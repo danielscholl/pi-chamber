@@ -1,0 +1,49 @@
+{
+  "name": "pi-chamber",
+  "version": "0.1.0",
+  "description": "Pi extension package: durable agent identities (Genesis minds), single- and multi-mind conversations (mind, room), and a localhost lens server (observatory).",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "extension",
+    "multi-agent",
+    "minds",
+    "chamber",
+    "observatory"
+  ],
+  "files": [
+    "*.ts",
+    "genesis/**",
+    "mind/**",
+    "room/**",
+    "observatory/**",
+    "shared/**",
+    "dist/**",
+    "README.md",
+    "AGENTS.md"
+  ],
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "typebox": "^1.1.24"
+  },
+  "devDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@types/bun": "latest",
+    "typescript": "^5.6.0"
+  },
+  "pi": {
+    "extensions": [
+      "./genesis/index.ts",
+      "./mind/index.ts",
+      "./room/index.ts",
+      "./observatory/index.ts"
+    ]
+  }
+}

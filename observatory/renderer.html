@@ -1,0 +1,405 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="referrer" content="no-referrer" />
+<title>Pi Observatory</title>
+<style>
+:root {
+	--bg: #0e1018;
+	--panel: #161a25;
+	--panel-2: #1d2230;
+	--border: #2a3043;
+	--text: #e6e8f0;
+	--muted: #8b93a7;
+	--accent: #7aa2f7;
+	--ok: #9ece6a;
+	--warn: #e0af68;
+	--err: #f7768e;
+	--idle: #565f89;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text);
+	font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+	font-size: 14px; line-height: 1.45; height: 100%; }
+body { display: flex; flex-direction: column; min-height: 100vh; }
+header { display: flex; align-items: center; gap: 16px;
+	padding: 14px 20px; border-bottom: 1px solid var(--border); background: var(--panel); }
+header h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: 0.02em; }
+header .spacer { flex: 1; }
+header button { background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+	border-radius: 6px; padding: 6px 12px; font: inherit; cursor: pointer; }
+header button:hover { border-color: var(--accent); }
+header .meta { color: var(--muted); font-size: 12px; }
+main.layout { display: flex; flex: 1; min-height: 0; }
+aside { width: 240px; flex: 0 0 240px; border-right: 1px solid var(--border);
+	background: var(--panel); overflow-y: auto; }
+aside h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
+	color: var(--muted); margin: 16px 16px 8px; }
+aside .lens-item { display: flex; align-items: center; gap: 10px;
+	padding: 8px 16px; cursor: pointer; border-left: 3px solid transparent;
+	color: var(--text); font-size: 13px; }
+aside .lens-item:hover { background: var(--panel-2); }
+aside .lens-item.selected { background: var(--panel-2); border-left-color: var(--accent); }
+aside .lens-item.invalid { color: var(--muted); cursor: default; }
+aside .lens-item.invalid:hover { background: transparent; }
+aside .lens-item .badge { font-size: 11px; flex: 0 0 auto; }
+aside .lens-item .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+section.body { flex: 1; min-width: 0; padding: 24px; overflow-y: auto; }
+section.body .empty { color: var(--muted); max-width: 520px; line-height: 1.6; }
+section.body .empty h2 { color: var(--text); margin-top: 0; font-size: 18px; font-weight: 600; }
+section.body .empty code { background: var(--panel-2); border: 1px solid var(--border);
+	padding: 1px 6px; border-radius: 4px; font-size: 13px; }
+section.body .lens-header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 18px; }
+section.body .lens-header h2 { margin: 0; font-size: 18px; font-weight: 600; }
+section.body .lens-header .desc { color: var(--muted); font-size: 13px; }
+.banner { display: none; padding: 10px 16px; margin: 12px 20px 0;
+	background: var(--panel-2); border: 1px solid var(--warn); border-radius: 6px;
+	color: var(--text); font-size: 13px; }
+.banner.show { display: block; }
+.banner ul { margin: 6px 0 0; padding-left: 18px; color: var(--muted); }
+.error { color: var(--err); padding: 12px; background: var(--panel-2);
+	border: 1px solid var(--err); border-radius: 6px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+	gap: 12px; }
+.card { background: var(--panel); border: 1px solid var(--border);
+	border-radius: 8px; padding: 14px 16px; }
+.card .label { color: var(--muted); font-size: 11px;
+	text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 6px; }
+.card .value-num { font-size: 26px; font-weight: 600; color: var(--text); }
+.card .value-str { font-size: 14px; color: var(--text); word-break: break-word; }
+.status-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+	gap: 12px; }
+.status-card { background: var(--panel); border: 1px solid var(--border);
+	border-radius: 8px; padding: 12px 14px; }
+.status-card .head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+.status-card .dot { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto; }
+.status-card .name { flex: 1; font-weight: 600; }
+.status-card .badge { font-size: 11px; padding: 2px 8px; border-radius: 999px;
+	border: 1px solid var(--border); color: var(--muted); }
+.status-card .meta { display: grid; grid-template-columns: max-content 1fr;
+	gap: 4px 12px; color: var(--muted); font-size: 12px; }
+.status-card .meta dt { font-weight: 500; }
+.status-card .meta dd { margin: 0; color: var(--text); word-break: break-word; }
+.dot-ok { background: var(--ok); }
+.dot-warn { background: var(--warn); }
+.dot-err { background: var(--err); }
+.dot-idle { background: var(--idle); }
+.badge-ok { color: var(--ok); border-color: var(--ok); }
+.badge-warn { color: var(--warn); border-color: var(--warn); }
+.badge-err { color: var(--err); border-color: var(--err); }
+.badge-idle { color: var(--idle); border-color: var(--idle); }
+</style>
+</head>
+<body>
+<header>
+	<h1>π Observatory</h1>
+	<span class="meta" id="meta"></span>
+	<span class="spacer"></span>
+	<button id="refresh" type="button">Refresh</button>
+</header>
+<div class="banner" id="banner"></div>
+<main class="layout">
+	<aside id="sidebar">
+		<h2>Lenses</h2>
+		<div id="lens-list"></div>
+	</aside>
+	<section class="body" id="body"></section>
+</main>
+<script type="module">
+const STATUS_OK = ["ok", "running", "active", "success", "healthy", "online", "passing"];
+const STATUS_WARN = ["warn", "warning", "pending", "degraded", "stale"];
+const STATUS_ERR = ["error", "fail", "failed", "down", "critical", "broken"];
+
+const el = {
+	sidebar: document.getElementById("lens-list"),
+	body: document.getElementById("body"),
+	banner: document.getElementById("banner"),
+	meta: document.getElementById("meta"),
+	refresh: document.getElementById("refresh"),
+};
+
+let lenses = [];
+let selectedId = null;
+
+el.refresh.addEventListener("click", () => {
+	loadLenses({ keepSelection: true });
+});
+
+async function loadLenses({ keepSelection = false } = {}) {
+	let payload;
+	try {
+		const res = await fetch("/api/lenses", { cache: "no-store" });
+		if (!res.ok) throw new Error("/api/lenses responded " + res.status);
+		payload = await res.json();
+	} catch (err) {
+		renderError("Could not load /api/lenses: " + err.message);
+		return;
+	}
+	lenses = payload.lenses || [];
+	const validCount = lenses.filter((p) => p.status === "ok").length;
+	const invalidCount = lenses.length - validCount;
+	el.meta.textContent = `${validCount} lens${validCount === 1 ? "" : "es"}` +
+		(invalidCount ? `, ${invalidCount} invalid` : "");
+	renderBanner();
+	renderSidebar();
+
+	if (!lenses.length) {
+		selectedId = null;
+		renderEmpty();
+		return;
+	}
+
+	const stillExists = keepSelection &&
+		lenses.some((p) => p.id === selectedId && p.status === "ok");
+	if (!stillExists) {
+		const firstOk = lenses.find((p) => p.status === "ok");
+		selectedId = firstOk ? firstOk.id : null;
+	}
+
+	if (selectedId) {
+		await renderSelectedLens();
+	} else {
+		renderEmpty();
+	}
+}
+
+function renderSidebar() {
+	el.sidebar.innerHTML = "";
+	if (!lenses.length) return;
+	for (const lens of lenses) {
+		const item = document.createElement("div");
+		item.className = "lens-item" + (lens.status === "invalid" ? " invalid" : "");
+		if (lens.id === selectedId && lens.status === "ok") item.classList.add("selected");
+
+		const badge = document.createElement("span");
+		badge.className = "badge";
+		badge.textContent = lens.status === "ok" ? "✓" : "⚠";
+		item.appendChild(badge);
+
+		const name = document.createElement("span");
+		name.className = "name";
+		name.textContent = lens.status === "ok" ? lens.manifest.name : lens.id;
+		item.appendChild(name);
+
+		if (lens.status === "invalid") {
+			item.title = lens.reason || "invalid lens";
+		} else {
+			item.addEventListener("click", () => {
+				selectedId = lens.id;
+				renderSidebar();
+				renderSelectedLens();
+			});
+		}
+		el.sidebar.appendChild(item);
+	}
+}
+
+function renderBanner() {
+	const invalid = lenses.filter((p) => p.status === "invalid");
+	if (!invalid.length) {
+		el.banner.classList.remove("show");
+		el.banner.innerHTML = "";
+		return;
+	}
+	el.banner.classList.add("show");
+	el.banner.innerHTML = "";
+	const heading = document.createElement("strong");
+	heading.textContent = `${invalid.length} lens${invalid.length === 1 ? "" : "es"} invalid`;
+	el.banner.appendChild(heading);
+	const ul = document.createElement("ul");
+	for (const p of invalid) {
+		const li = document.createElement("li");
+		const id = document.createElement("code");
+		id.textContent = p.id;
+		li.appendChild(id);
+		li.appendChild(document.createTextNode(" — " + (p.reason || "unknown")));
+		ul.appendChild(li);
+	}
+	el.banner.appendChild(ul);
+}
+
+async function renderSelectedLens() {
+	const lens = lenses.find((p) => p.id === selectedId);
+	if (!lens || lens.status !== "ok") {
+		renderEmpty();
+		return;
+	}
+
+	el.body.innerHTML = "";
+	const header = document.createElement("div");
+	header.className = "lens-header";
+	const h2 = document.createElement("h2");
+	h2.textContent = lens.manifest.name;
+	header.appendChild(h2);
+	if (lens.manifest.description) {
+		const desc = document.createElement("span");
+		desc.className = "desc";
+		desc.textContent = lens.manifest.description;
+		header.appendChild(desc);
+	}
+	el.body.appendChild(header);
+
+	let payload;
+	try {
+		const res = await fetch(`/api/lenses/${encodeURIComponent(lens.id)}/data`, {
+			cache: "no-store",
+		});
+		const json = await res.json();
+		if (!res.ok) {
+			renderInlineError(json.error || `request failed (${res.status})`);
+			return;
+		}
+		payload = json.data;
+	} catch (err) {
+		renderInlineError("Could not fetch data: " + err.message);
+		return;
+	}
+
+	if (lens.manifest.kind === "briefing") {
+		el.body.appendChild(renderBriefing(payload));
+	} else if (lens.manifest.kind === "status-board") {
+		el.body.appendChild(renderStatusBoard(payload));
+	} else {
+		renderInlineError(`Unsupported lens kind: ${lens.manifest.kind}`);
+	}
+}
+
+function renderBriefing(data) {
+	const wrap = document.createElement("div");
+	wrap.className = "cards";
+	if (!data || typeof data !== "object" || Array.isArray(data)) {
+		wrap.appendChild(infoCard("(empty briefing — data should be a flat object)"));
+		return wrap;
+	}
+	const keys = Object.keys(data);
+	if (!keys.length) {
+		wrap.appendChild(infoCard("(briefing has no fields yet)"));
+		return wrap;
+	}
+	for (const key of keys) {
+		const value = data[key];
+		const card = document.createElement("div");
+		card.className = "card";
+		const label = document.createElement("div");
+		label.className = "label";
+		label.textContent = key.replace(/_/g, " ");
+		card.appendChild(label);
+		const val = document.createElement("div");
+		if (typeof value === "number") {
+			val.className = "value-num";
+			val.textContent = String(value);
+		} else if (typeof value === "string" || typeof value === "boolean") {
+			val.className = "value-str";
+			val.textContent = String(value);
+		} else if (value === null || value === undefined) {
+			val.className = "value-str";
+			val.textContent = "—";
+		} else {
+			val.className = "value-str";
+			val.textContent = JSON.stringify(value);
+		}
+		card.appendChild(val);
+		wrap.appendChild(card);
+	}
+	return wrap;
+}
+
+function renderStatusBoard(data) {
+	const wrap = document.createElement("div");
+	wrap.className = "status-list";
+	const items = Array.isArray(data) ? data : data && typeof data === "object" ? [data] : [];
+	if (!items.length) {
+		wrap.appendChild(infoCard("(status-board has no entries yet)"));
+		return wrap;
+	}
+	for (const item of items) {
+		if (!item || typeof item !== "object") continue;
+		const card = document.createElement("div");
+		card.className = "status-card";
+
+		const head = document.createElement("div");
+		head.className = "head";
+		const status = typeof item.status === "string" ? item.status : "";
+		const tier = statusTier(status);
+		const dot = document.createElement("span");
+		dot.className = `dot dot-${tier}`;
+		head.appendChild(dot);
+		const name = document.createElement("span");
+		name.className = "name";
+		name.textContent = item.name || item.title || item.id || "(unnamed)";
+		head.appendChild(name);
+		if (status) {
+			const badge = document.createElement("span");
+			badge.className = `badge badge-${tier}`;
+			badge.textContent = status;
+			head.appendChild(badge);
+		}
+		card.appendChild(head);
+
+		const meta = document.createElement("dl");
+		meta.className = "meta";
+		const skip = new Set(["name", "title", "id", "status"]);
+		const extras = Object.keys(item).filter((k) => !skip.has(k)).slice(0, 4);
+		for (const key of extras) {
+			const dt = document.createElement("dt");
+			dt.textContent = key.replace(/_/g, " ");
+			const dd = document.createElement("dd");
+			const v = item[key];
+			dd.textContent = v === null || v === undefined
+				? "—"
+				: typeof v === "object" ? JSON.stringify(v) : String(v);
+			meta.appendChild(dt);
+			meta.appendChild(dd);
+		}
+		if (extras.length) card.appendChild(meta);
+		wrap.appendChild(card);
+	}
+	return wrap;
+}
+
+function statusTier(text) {
+	const lower = String(text).toLowerCase();
+	if (STATUS_ERR.some((s) => lower.includes(s))) return "err";
+	if (STATUS_WARN.some((s) => lower.includes(s))) return "warn";
+	if (STATUS_OK.some((s) => lower.includes(s))) return "ok";
+	return "idle";
+}
+
+function infoCard(text) {
+	const card = document.createElement("div");
+	card.className = "card";
+	const v = document.createElement("div");
+	v.className = "value-str";
+	v.textContent = text;
+	card.appendChild(v);
+	return card;
+}
+
+function renderEmpty() {
+	el.body.innerHTML = "";
+	const wrap = document.createElement("div");
+	wrap.className = "empty";
+	const h2 = document.createElement("h2");
+	h2.textContent = "No lenses yet";
+	wrap.appendChild(h2);
+	el.body.appendChild(wrap);
+}
+
+function renderInlineError(message) {
+	const div = document.createElement("div");
+	div.className = "error";
+	div.textContent = message;
+	el.body.appendChild(div);
+}
+
+function renderError(message) {
+	el.body.innerHTML = "";
+	renderInlineError(message);
+}
+
+loadLenses();
+</script>
+</body>
+</html>
