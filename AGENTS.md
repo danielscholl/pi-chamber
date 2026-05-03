@@ -30,10 +30,9 @@ room/strategies.ts   # concurrent / sequential / group-chat orchestration
 room/ui.ts           # palette, message renderers, participant-bar factory
 room/observatory.ts  # writes a status-board observatory lens mirroring live room state
 
-observatory/index.ts         # /observatory runtime wiring + server lifecycle
-observatory/core.ts          # discovery, validation, path-containment helpers
-observatory/server.ts        # HTTP server factory (Bun or node:http)
-observatory/renderer.html    # static renderer (vanilla JS, no build)
+observatory/index.ts         # /observatory runtime wiring + TUI overlay launch
+observatory/core.ts          # discovery, validation, path-containment helpers, lens data reader
+observatory/tui/             # TUI overlay component, render-* modules, input handling, watcher
 
 shared/session-exit.ts       # shared /exit command coordinator (mind + room)
 ```
@@ -91,14 +90,16 @@ If a `/genesis` prompt provides a `requestId`, call `genesis_write_files` exactl
 
 ## Observatory rules
 
-- The framework owns the server, renderer, discovery, and validation. Minds author lenses by writing two files; do not bypass that.
+- The framework owns the TUI overlay, discovery, and validation. Minds author lenses by writing two files; do not bypass that.
 - Lens files live at `.pi/observatory/lenses/<slug>/lens.json` plus a data file referenced by the manifest's `source` field.
 - v1 manifest schema: `name`, `kind` (`briefing` or `status-board`), `source` (bare filename), optional `icon`, optional `description`. Anything else is silently ignored.
 - `source` must be a bare filename. The framework rejects `/`, `..`, absolute paths, and the literal `lens.json`. Symlinked data files are also rejected.
-- v1 lens kinds are only `briefing` (flat object → card grid) and `status-board` (array of `{name, status, ...}` → status cards). `form`, `table`, `detail`, `timeline`, `editor` are future work.
-- v1 has no `prompt`, no `refreshOn`, no `schema`, and no writeback. Refresh = browser reload.
+- v1 lens kinds are only `briefing` (flat object → key/value rows) and `status-board` (array of `{name, status, ...}` → status blocks). `form`, `table`, `detail`, `timeline`, `editor` are future work.
+- v1 has no `prompt`, no `refreshOn`, no `schema`, and no writeback. Refresh = filesystem watch (debounced 300ms) plus manual `r`.
 - Keep deterministic discovery, validation, and path-containment helpers in `observatory/core.ts` with Bun tests.
-- Server binds `127.0.0.1` only. Do not change the host to `0.0.0.0`.
+- Keep render functions in `observatory/tui/render-*.ts` pure — they take data + width and return `string[]`. The component layer owns side effects (watcher, theme application, requestRender).
+- The `/observatory` overlay is on-demand only. There is no `openOnStart` or `session_start` auto-mount.
+- The built-in Dashboard view is synthesized in-memory from discovered lenses, the optional `room` status-board lens, the Genesis mind list, and lens-root mtimes; it is not authored as a lens on disk. The repo still ships zero lenses.
 - Do not author default lenses in this repo; pi-chamber ships zero lenses. Tutorial walkthroughs may author them, but committed lenses belong with the consumer workspace, not the framework.
 
 ## Coding conventions

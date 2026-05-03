@@ -13,10 +13,9 @@ import path from "node:path";
 import {
 	ALLOWED_LENS_KINDS,
 	DEFAULT_OBSERVATORY_CONFIG,
-	DEFAULT_OBSERVATORY_HOST,
-	DEFAULT_OBSERVATORY_PORT,
 	discoverLenses,
 	loadObservatoryConfig,
+	readLensData,
 	resolveDataFilePath,
 	resolveLensesRoot,
 	validateSourceFilename,
@@ -321,7 +320,23 @@ describe("loadObservatoryConfig", () => {
 		});
 	});
 
-	test("merges supported settings and ignores absent ones", () => {
+	test("merges lensesPath when provided", () => {
+		withTempProject((cwd) => {
+			fs.mkdirSync(path.join(cwd, ".pi"), { recursive: true });
+			fs.writeFileSync(
+				path.join(cwd, ".pi", "settings.json"),
+				JSON.stringify({
+					observatory: {
+						lensesPath: "./.pi/observatory/lenses",
+					},
+				}),
+			);
+			const config = loadObservatoryConfig(cwd);
+			expect(config.lensesPath).toBe("./.pi/observatory/lenses");
+		});
+	});
+
+	test("silently ignores legacy server fields (port, host, openOnStart)", () => {
 		withTempProject((cwd) => {
 			fs.mkdirSync(path.join(cwd, ".pi"), { recursive: true });
 			fs.writeFileSync(
@@ -330,16 +345,13 @@ describe("loadObservatoryConfig", () => {
 					observatory: {
 						lensesPath: "./.pi/observatory/lenses",
 						port: 9999,
-						host: DEFAULT_OBSERVATORY_HOST,
+						host: "0.0.0.0",
 						openOnStart: true,
 					},
 				}),
 			);
 			const config = loadObservatoryConfig(cwd);
-			expect(config.lensesPath).toBe("./.pi/observatory/lenses");
-			expect(config.port).toBe(9999);
-			expect(config.host).toBe(DEFAULT_OBSERVATORY_HOST);
-			expect(config.openOnStart).toBe(true);
+			expect(config).toEqual({ lensesPath: "./.pi/observatory/lenses" });
 		});
 	});
 
@@ -350,36 +362,6 @@ describe("loadObservatoryConfig", () => {
 			expect(() => loadObservatoryConfig(cwd)).toThrow(
 				/Failed to parse \.pi\/settings\.json for Observatory config/,
 			);
-		});
-	});
-
-	test("rejects non-loopback host bindings", () => {
-		withTempProject((cwd) => {
-			fs.mkdirSync(path.join(cwd, ".pi"), { recursive: true });
-			fs.writeFileSync(
-				path.join(cwd, ".pi", "settings.json"),
-				JSON.stringify({ observatory: { host: "0.0.0.0" } }),
-			);
-			expect(() => loadObservatoryConfig(cwd)).toThrow(/host must be 127\.0\.0\.1/);
-		});
-	});
-
-	test("rejects out-of-range and non-integer ports", () => {
-		withTempProject((cwd) => {
-			fs.mkdirSync(path.join(cwd, ".pi"), { recursive: true });
-			fs.writeFileSync(
-				path.join(cwd, ".pi", "settings.json"),
-				JSON.stringify({ observatory: { port: 70000 } }),
-			);
-			expect(() => loadObservatoryConfig(cwd)).toThrow(/port must be between/);
-		});
-		withTempProject((cwd) => {
-			fs.mkdirSync(path.join(cwd, ".pi"), { recursive: true });
-			fs.writeFileSync(
-				path.join(cwd, ".pi", "settings.json"),
-				JSON.stringify({ observatory: { port: "8080" } }),
-			);
-			expect(() => loadObservatoryConfig(cwd)).toThrow(/port must be an integer/);
 		});
 	});
 });
@@ -417,13 +399,73 @@ describe("resolveLensesRoot", () => {
 
 describe("default constants", () => {
 	test("defaults match the documented v1 contract", () => {
-		expect(DEFAULT_OBSERVATORY_HOST).toBe("127.0.0.1");
-		expect(DEFAULT_OBSERVATORY_PORT).toBe(7878);
 		expect(DEFAULT_OBSERVATORY_CONFIG).toEqual({
 			lensesPath: "./.pi/observatory/lenses",
-			port: 7878,
-			host: "127.0.0.1",
-			openOnStart: false,
+		});
+	});
+});
+
+describe("readLensData", () => {
+	test("returns parsed JSON for a well-formed data file", () => {
+		withTempProject((cwd) => {
+			const lensesRoot = makeLensesRoot(cwd);
+			writeLens(
+				lensesRoot,
+				"ops",
+				{ name: "Ops", kind: "briefing", source: "data.json" },
+				{ active_minds: 3, top_priority: "Ship the TUI." },
+			);
+			const result = readLensData(lensesRoot, "ops", { source: "data.json" });
+			expect(result.ok).toBe(true);
+			if (result.ok) {
+				expect(result.data).toEqual({
+					active_minds: 3,
+					top_priority: "Ship the TUI.",
+				});
+			}
+		});
+	});
+
+	test("reports a missing data file with a helpful reason", () => {
+		withTempProject((cwd) => {
+			const lensesRoot = makeLensesRoot(cwd);
+			writeLens(lensesRoot, "ops", {
+				name: "Ops",
+				kind: "briefing",
+				source: "data.json",
+			});
+			const result = readLensData(lensesRoot, "ops", { source: "data.json" });
+			expect(result.ok).toBe(false);
+			if (!result.ok) {
+				expect(result.reason).toMatch(/data file is missing/);
+			}
+		});
+	});
+
+	test("reports invalid JSON", () => {
+		withTempProject((cwd) => {
+			const lensesRoot = makeLensesRoot(cwd);
+			writeLens(
+				lensesRoot,
+				"ops",
+				{ name: "Ops", kind: "briefing", source: "data.json" },
+				"{ not json",
+			);
+			const result = readLensData(lensesRoot, "ops", { source: "data.json" });
+			expect(result.ok).toBe(false);
+			if (!result.ok) {
+				expect(result.reason).toMatch(/not valid JSON/);
+			}
+		});
+	});
+
+	test("rejects bad ids and bad sources via path containment", () => {
+		withTempProject((cwd) => {
+			const lensesRoot = makeLensesRoot(cwd);
+			const badId = readLensData(lensesRoot, "Bad Id", { source: "data.json" });
+			expect(badId.ok).toBe(false);
+			const badSource = readLensData(lensesRoot, "ops", { source: "../escape" });
+			expect(badSource.ok).toBe(false);
 		});
 	});
 });
