@@ -282,6 +282,22 @@ export default function (pi: ExtensionAPI) {
 		}));
 	}
 
+	function describeActiveRoom(
+		state: RoomState | undefined,
+		cwd: string,
+	): string {
+		const saved = state?.slug ? safeReadSavedRoom(cwd, state.slug) : undefined;
+		return describeRoomState(
+			state,
+			saved
+				? {
+						synthesizer: saved.synthesizer,
+						groupChat: saved.groupChat,
+					}
+				: undefined,
+		);
+	}
+
 	function syncParticipantWidget(
 		ctx: Pick<RoomCommandContext, "hasUI" | "ui">,
 	): void {
@@ -486,8 +502,7 @@ export default function (pi: ExtensionAPI) {
 					speaker: inner.speaker,
 					content: inner.content,
 					turnNumber: inner.turnNumber,
-					isModerator:
-						inner.role === "moderator" || inner.role === "synthesis",
+					isModerator: inner.role === "synthesis",
 				});
 			}
 		}
@@ -636,16 +651,10 @@ export default function (pi: ExtensionAPI) {
 			cwd: ctx.cwd,
 			signal,
 			spawn,
-			emitMindStart: (slug, role, _turnNumber) => {
+			emitMindStart: (slug, _role, _turnNumber) => {
 				const messageId = nextMessageId();
 				speechBuffersLocal.set(messageId, { slug, text: "" });
-				if (role === "speaker") {
-					setParticipantStatus(slug, "speaking", ctx);
-				} else if (role === "moderator") {
-					setParticipantStatus(slug, "thinking", ctx);
-				} else if (role === "synthesis") {
-					setParticipantStatus(slug, "speaking", ctx);
-				}
+				setParticipantStatus(slug, "speaking", ctx);
 				syncObservatoryLens(ctx.cwd);
 				return messageId;
 			},
@@ -729,6 +738,9 @@ export default function (pi: ExtensionAPI) {
 				const consumed: DirectorOverrides = { ...pendingDirectorOverrides };
 				pendingDirectorOverrides = {};
 				return consumed;
+			},
+			notifyWarning: (message) => {
+				notify(ctx, message, "warning");
 			},
 		};
 	}
@@ -1367,7 +1379,7 @@ export default function (pi: ExtensionAPI) {
 		syncObservatoryLens(ctx.cwd);
 		notify(
 			ctx,
-			`${describeRoomState(activeRoom)} Loaded ${activeDiskTranscript.length} prior turn${activeDiskTranscript.length === 1 ? "" : "s"}. Use /exit to stop routing.`,
+			`${describeActiveRoom(activeRoom, ctx.cwd)} Loaded ${activeDiskTranscript.length} prior turn${activeDiskTranscript.length === 1 ? "" : "s"}. Use /exit to stop routing.`,
 			"info",
 		);
 	}
@@ -1497,13 +1509,13 @@ export default function (pi: ExtensionAPI) {
 				parentSession: returnSessionFile,
 				setup: (sessionManager) => {
 					sessionManager.appendCustomEntry?.(STATE_STREAM, stateForNewSession);
-					const label = describeRoomState(stateForNewSession);
+					const label = describeActiveRoom(stateForNewSession, ctx.cwd);
 					sessionManager.appendSessionInfo?.(`Room: ${label}`);
 				},
 				withSession: (replacementCtx) => {
 					notify(
 						replacementCtx,
-						`${describeRoomState(stateForNewSession)}${savedNote} Dedicated room session. Use /exit to return to the previous session.`,
+						`${describeActiveRoom(stateForNewSession, replacementCtx.cwd)}${savedNote} Dedicated room session. Use /exit to return to the previous session.`,
 						"info",
 					);
 				},
@@ -1526,7 +1538,7 @@ export default function (pi: ExtensionAPI) {
 		syncObservatoryLens(ctx.cwd);
 		notify(
 			ctx,
-			`${describeRoomState(activeRoom)}${savedNote} Use /exit to stop routing.`,
+			`${describeActiveRoom(activeRoom, ctx.cwd)}${savedNote} Use /exit to stop routing.`,
 			"info",
 		);
 	}
@@ -1569,6 +1581,10 @@ export default function (pi: ExtensionAPI) {
 		activeRoomStartedAt = undefined;
 		pendingDirectorOverrides = {};
 		lastInactiveRoom = inactive;
+		// Drop cached MindSpecs so the next /room on freshly reads each
+		// mind-config.json. Without this, edits to model/tools/fallbackModels
+		// between rooms within a single Pi session would be ignored until restart.
+		mindSpecCache.clear();
 		persistState(inactive);
 		setRoomStatus(ctx, undefined);
 		syncParticipantWidget(ctx);
@@ -1607,7 +1623,7 @@ export default function (pi: ExtensionAPI) {
 	function showRoomStatus(ctx: RoomCommandContext): void {
 		notify(
 			ctx,
-			describeRoomState(activeRoom),
+			describeActiveRoom(activeRoom, ctx.cwd),
 			activeRoom?.active ? "info" : "warning",
 		);
 	}
@@ -1673,6 +1689,10 @@ export default function (pi: ExtensionAPI) {
 			);
 			return;
 		}
+		// clearedAt / clearCount are display metadata; the actual history-window
+		// reset comes from the persistState side effect below. roomHistoryStartIndex
+		// scans for any room-state entry and advances past it, so writing a new one
+		// fences off prior in-session rounds without touching the JSONL transcript.
 		activeRoom = {
 			...activeRoom,
 			clearedAt: new Date().toISOString(),
@@ -1703,7 +1723,7 @@ export default function (pi: ExtensionAPI) {
 		setRoomStatus(ctx, activeRoom);
 		syncParticipantWidget(ctx);
 		syncObservatoryLens(ctx.cwd);
-		notify(ctx, `${message} ${describeRoomState(activeRoom)}`, "info");
+		notify(ctx, `${message} ${describeActiveRoom(activeRoom, ctx.cwd)}`, "info");
 	}
 }
 

@@ -93,14 +93,12 @@ export type TranscriptHeader = {
 	createdAt: string;
 };
 
-export type RoomStateEntry = RoomState;
-
 export type RoomTranscriptTurnV2 = {
 	version: 2;
 	user: string;
 	turns: Array<{
 		speaker: string;
-		role: "speaker" | "moderator" | "synthesis";
+		role: "speaker" | "synthesis";
 		content: string;
 		turnNumber?: number;
 		paletteIndex?: number;
@@ -299,7 +297,7 @@ export function validateRoomState(
 
 export function latestRoomState(
 	entries: Array<Record<string, unknown>>,
-): RoomStateEntry | undefined {
+): RoomState | undefined {
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];
 		if (
@@ -309,17 +307,32 @@ export function latestRoomState(
 			continue;
 		}
 		const data = entry.data;
-		if (isRoomStateLike(data)) return data as RoomStateEntry;
+		if (isRoomStateLike(data)) return data as RoomState;
 	}
 	return undefined;
 }
 
-export function describeRoomState(state: RoomState | undefined): string {
+export type RoomDescriptionOverrides = {
+	synthesizer?: string;
+	groupChat?: GroupChatOverrides;
+};
+
+export function describeRoomState(
+	state: RoomState | undefined,
+	overrides?: RoomDescriptionOverrides,
+): string {
 	if (!state?.active) return "Room off.";
 	const participants = state.participants.join(", ");
 	const base = `Room active: ${state.mode} with ${state.participants.length} mind${state.participants.length === 1 ? "" : "s"} (${participants}).`;
 	if (state.mode !== "group-chat") return base;
-	return `${base} Moderator: chairman (built-in). Limits: ${DEFAULT_GROUP_CHAT_MIN_ROUNDS} min round, ${DEFAULT_GROUP_CHAT_MAX_TURNS} max turns, ${DEFAULT_GROUP_CHAT_REPEAT_CAP} repeat cap.`;
+	const moderator = overrides?.synthesizer ?? "chairman (built-in)";
+	const minRounds =
+		overrides?.groupChat?.minRounds ?? DEFAULT_GROUP_CHAT_MIN_ROUNDS;
+	const maxTurns =
+		overrides?.groupChat?.maxTurns ?? DEFAULT_GROUP_CHAT_MAX_TURNS;
+	const repeatCap =
+		overrides?.groupChat?.maxSpeakerRepeats ?? DEFAULT_GROUP_CHAT_REPEAT_CAP;
+	return `${base} Moderator: ${moderator}. Limits: ${minRounds} min round, ${maxTurns} max turns, ${repeatCap} repeat cap.`;
 }
 
 export function xmlEscape(value: string): string {
@@ -798,7 +811,7 @@ export function appendRoomTranscriptTurn(
  * speaker is the synthetic slug `"room"` so that downstream consumers can
  * uniformly walk V2 structure even for pre-upgrade transcripts.
  */
-export function liftV1TurnToV2(turn: RoomTranscriptTurn): RoomTranscriptTurnV2 {
+function liftV1TurnToV2(turn: RoomTranscriptTurn): RoomTranscriptTurnV2 {
 	return {
 		version: 2,
 		user: turn.user,
@@ -819,12 +832,7 @@ function isV2InnerTurnLike(value: unknown): boolean {
 	const t = value as Record<string, unknown>;
 	if (typeof t.speaker !== "string" || !t.speaker) return false;
 	if (typeof t.content !== "string") return false;
-	if (
-		t.role !== "speaker" &&
-		t.role !== "moderator" &&
-		t.role !== "synthesis"
-	)
-		return false;
+	if (t.role !== "speaker" && t.role !== "synthesis") return false;
 	if (
 		t.turnNumber !== undefined &&
 		(typeof t.turnNumber !== "number" || !Number.isFinite(t.turnNumber))
@@ -931,36 +939,3 @@ export function readRoomTranscript(
 	return turns.slice(-Math.max(0, maxTurns));
 }
 
-/** Flatten a V2 turn's per-speaker breakdown into a single assistant blob.
- * Used by legacy callers that only know the V1 RoomHistoryRound shape. */
-export function flattenV2TurnToHistoryRound(
-	turn: RoomTranscriptTurnV2,
-): RoomHistoryRound {
-	const assistant = turn.turns
-		.map((t) => `[${t.speaker}]\n${t.content.trim()}`)
-		.join("\n\n");
-	return { user: turn.user, assistant };
-}
-
-/**
- * Merge in-session rounds with persisted V2 transcript turns into a flat
- * `RoomHistoryRound[]` for callers that only need the legacy shape.
- *
- * Session rounds win for the most-recent slot; older slots are padded from
- * the tail of the disk transcript (flattened per-speaker turns into a
- * single assistant blob). For per-speaker fidelity, prefer
- * `selectPriorRoundsV2` directly.
- */
-export function mergeRoomHistory(
-	sessionRounds: RoomHistoryRound[],
-	transcriptTurns: RoomTranscriptTurnV2[],
-	targetCount: number,
-): RoomHistoryRound[] {
-	if (sessionRounds.length >= targetCount)
-		return sessionRounds.slice(-targetCount);
-	const need = targetCount - sessionRounds.length;
-	const padded: RoomHistoryRound[] = transcriptTurns
-		.slice(-need)
-		.map(flattenV2TurnToHistoryRound);
-	return [...padded, ...sessionRounds];
-}

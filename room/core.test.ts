@@ -14,11 +14,11 @@ import {
 	appendRoomTranscriptTurn,
 	buildRoomHistoryFromEntries,
 	deleteSavedRoom,
+	describeRoomState,
 	dropRoomSessions,
 	latestRoomState,
 	listRoomSessions,
 	listSavedRooms,
-	mergeRoomHistory,
 	normalizeParticipantInput,
 	normalizeRoomSlug,
 	parseRoomArgs,
@@ -673,50 +673,6 @@ describe("transcript IO", () => {
 	});
 });
 
-describe("mergeRoomHistory", () => {
-	test("pads from transcript (V2) when session rounds are short of target", () => {
-		const session = [{ user: "now", assistant: "now-answer" }];
-		const transcript = [
-			v2TurnFromV1("old", "old-answer", ""),
-			v2TurnFromV1("older", "older-answer", ""),
-		];
-		expect(mergeRoomHistory(session, transcript, 2)).toEqual([
-			{ user: "older", assistant: "[room]\nolder-answer" },
-			{ user: "now", assistant: "now-answer" },
-		]);
-	});
-
-	test("returns session-only view when session already meets target", () => {
-		const session = [
-			{ user: "a", assistant: "1" },
-			{ user: "b", assistant: "2" },
-			{ user: "c", assistant: "3" },
-		];
-		expect(mergeRoomHistory(session, [], 2)).toEqual([
-			{ user: "b", assistant: "2" },
-			{ user: "c", assistant: "3" },
-		]);
-	});
-
-	test("flattens multi-speaker V2 turns into per-speaker assistant blob", () => {
-		const transcript: import("./core.ts").RoomTranscriptTurnV2[] = [
-			{
-				version: 2,
-				user: "what next?",
-				mode: "group-chat",
-				ts: "",
-				turns: [
-					{ speaker: "ariadne", role: "speaker", content: "do A" },
-					{ speaker: "mycroft", role: "speaker", content: "do B" },
-				],
-			},
-		];
-		expect(mergeRoomHistory([], transcript, 1)).toEqual([
-			{ user: "what next?", assistant: "[ariadne]\ndo A\n\n[mycroft]\ndo B" },
-		]);
-	});
-});
-
 describe("saved room optional fields", () => {
 	function makeRoom(overrides: Partial<SavedRoom> = {}): SavedRoom {
 		const now = new Date().toISOString();
@@ -1080,5 +1036,62 @@ describe("room session path helpers", () => {
 			expect(fs.existsSync(sessionsDir)).toBe(false);
 			expect(dropRoomSessions(cwd, "daily")).toBe(0);
 		});
+	});
+});
+
+describe("describeRoomState", () => {
+	function active(
+		mode: RoomState["mode"],
+		participants: string[] = ["a", "b"],
+	): RoomState {
+		return { active: true, mode, participants };
+	}
+
+	test("returns 'Room off.' when state is undefined or inactive", () => {
+		expect(describeRoomState(undefined)).toBe("Room off.");
+		expect(
+			describeRoomState({ active: false, mode: "concurrent", participants: [] }),
+		).toBe("Room off.");
+	});
+
+	test("non-group-chat modes omit moderator/limits", () => {
+		const out = describeRoomState(active("concurrent"));
+		expect(out).toContain("Room active: concurrent");
+		expect(out).not.toContain("Moderator:");
+		expect(out).not.toContain("Limits:");
+	});
+
+	test("group-chat without overrides falls back to chairman built-in defaults", () => {
+		const out = describeRoomState(active("group-chat"));
+		expect(out).toContain("Moderator: chairman (built-in)");
+		expect(out).toContain("Limits:");
+	});
+
+	test("group-chat honors synthesizer override in description", () => {
+		const out = describeRoomState(active("group-chat"), {
+			synthesizer: "mycroft",
+		});
+		expect(out).toContain("Moderator: mycroft");
+		expect(out).not.toContain("chairman (built-in)");
+	});
+
+	test("group-chat honors group-chat limit overrides", () => {
+		const out = describeRoomState(active("group-chat"), {
+			groupChat: { maxTurns: 12, minRounds: 3, maxSpeakerRepeats: 5 },
+		});
+		expect(out).toContain("3 min round");
+		expect(out).toContain("12 max turns");
+		expect(out).toContain("5 repeat cap");
+	});
+
+	test("partial override leaves untouched fields at defaults", () => {
+		const out = describeRoomState(active("group-chat"), {
+			groupChat: { maxTurns: 7 },
+		});
+		expect(out).toContain("7 max turns");
+		// minRounds and maxSpeakerRepeats should still be defaults; check for the
+		// trailing ' repeat cap' text rather than hardcoding the default value.
+		expect(out).toMatch(/\d+ min round/);
+		expect(out).toMatch(/\d+ repeat cap/);
 	});
 });

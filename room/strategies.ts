@@ -38,7 +38,7 @@ export type MindSpec = {
 	tools?: string[];
 };
 
-export type SpeechRole = "speaker" | "moderator" | "synthesis";
+export type SpeechRole = "speaker" | "synthesis";
 
 export type SpawnRequest = {
 	slug: string;
@@ -82,6 +82,13 @@ export type OrchestrationContext = {
 	 * single garbled reply.
 	 */
 	emitMindReset?: (messageId: string, slug: string) => void;
+	/**
+	 * Optional hook for surfacing non-fatal failures (e.g. moderator spawn
+	 * failure that falls back to a heuristic) as user-visible warnings.
+	 * Without this, the strategy must swallow the error to keep the round
+	 * alive, which hides config and network problems from the operator.
+	 */
+	notifyWarning?: (message: string) => void;
 	emitMindEnd: (
 		messageId: string,
 		slug: string,
@@ -464,7 +471,10 @@ async function executeGroupChat(
 			usageTotal.cost += result.usage.cost;
 			return result;
 		} catch (err) {
-			void err;
+			const reason = err instanceof Error ? err.message : String(err);
+			input.context.notifyWarning?.(
+				`Moderator (${moderator.slug}) failed during ${phase}: ${reason}. Falling back to round-robin pick.`,
+			);
 			return null;
 		}
 	};
