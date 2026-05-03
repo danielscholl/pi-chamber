@@ -164,6 +164,13 @@ export default function (pi: ExtensionAPI) {
 			await ctx.waitForIdle?.();
 			const result = await ctx.switchSession(returnSessionFile, {
 				withSession: (replacementCtx) => {
+					// The parent session never had this mind active in its own
+					// transcript, so don't carry the "Mind Mode Off" guard into
+					// it. Clear closure state so the next before_agent_start in
+					// the parent runs without injection. session_start firing on
+					// the parent will re-derive any state from its own entries.
+					activeMindSlug = undefined;
+					inactiveMindSlug = undefined;
 					setMindStatus(replacementCtx, undefined);
 					notify(
 						replacementCtx,
@@ -338,8 +345,15 @@ export default function (pi: ExtensionAPI) {
 		const eventCtx = ctx as unknown as MindModeEventContext;
 		if (!activeMindSlug) {
 			if (!inactiveMindSlug) return undefined;
+			// One-shot guard: name the previously-active mind once so the model
+			// doesn't drift back into its voice mid-conversation, then clear.
+			// Subsequent turns rely on normal base instructions; re-injecting
+			// the guard every turn for the rest of the session would be
+			// performative.
+			const guardSlug = inactiveMindSlug;
+			inactiveMindSlug = undefined;
 			return {
-				systemPrompt: `${event.systemPrompt}\n\n${buildMindModeOffSystemPrompt(inactiveMindSlug)}`,
+				systemPrompt: `${event.systemPrompt}\n\n${buildMindModeOffSystemPrompt(guardSlug)}`,
 			};
 		}
 

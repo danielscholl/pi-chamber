@@ -63,6 +63,21 @@ describe("normalizeMindSlug", () => {
 		expect(() => normalizeMindSlug("!!!")).toThrow(/ASCII letter or number/);
 		expect(() => normalizeMindSlug("   ")).toThrow(/ASCII letter or number/);
 	});
+
+	test("rejects /mind subcommand keywords as slugs", () => {
+		for (const reserved of ["help", "list", "create", "new"]) {
+			expect(() => normalizeMindSlug(reserved)).toThrow(/reserved/);
+			expect(() => normalizeMindSlug(reserved.toUpperCase())).toThrow(
+				/reserved/,
+			);
+		}
+		// Non-reserved slugs that share a prefix still pass through.
+		expect(normalizeMindSlug("listener")).toBe("listener");
+		expect(normalizeMindSlug("creative")).toBe("creative");
+		// `off` is intentionally NOT reserved; it falls through to the standard
+		// "mind not ready" error path when no such mind exists.
+		expect(normalizeMindSlug("off")).toBe("off");
+	});
 });
 
 describe("listGenesisMinds", () => {

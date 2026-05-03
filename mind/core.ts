@@ -59,7 +59,6 @@ export type LoadedMindContext = MindContext & {
 };
 
 export type LoadMindContextOptions = {
-	config?: GenesisConfig;
 	logMaxChars?: number;
 };
 
@@ -67,12 +66,24 @@ const SLUG_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 const LOG_TRUNCATION_MARKER =
 	"[... earlier chronological log entries omitted for mind context budget ...]\n";
 
+// Slugs that exact-match a /mind subcommand keyword cannot be activated via
+// `/mind <slug>` because the command dispatcher intercepts them first. Reject
+// them at normalization so such names never end up as discoverable minds.
+// `off` is intentionally not reserved: `/mind off` is documented as "not an
+// exit alias" and falls through to the standard "mind not ready" error path.
+const RESERVED_MIND_SLUGS = new Set(["help", "list", "create", "new"]);
+
 export function normalizeMindSlug(input: string): string {
 	const trimmed = input.trim();
 	const slug = SLUG_PATTERN.test(trimmed) ? trimmed : slugify(trimmed);
 	if (!slug) {
 		throw new Error(
 			"Mind slug must contain at least one ASCII letter or number.",
+		);
+	}
+	if (RESERVED_MIND_SLUGS.has(slug)) {
+		throw new Error(
+			`Mind slug "${slug}" is reserved for /mind subcommand keywords. Choose a different name.`,
 		);
 	}
 	return slug;
@@ -137,7 +148,7 @@ export function loadMindContext(
 	options: LoadMindContextOptions = {},
 ): LoadedMindContext {
 	const slug = normalizeMindSlug(inputSlug);
-	const config = options.config ?? loadGenesisConfig(cwd);
+	const config = loadGenesisConfig(cwd);
 	const paths = resolveGenesisPaths(cwd, slug, config);
 	assertMindModePathsInsideProject(paths);
 
@@ -170,6 +181,12 @@ export function loadMindContext(
 
 /**
  * Load optional per-mind config from `.pi/minds/<slug>/mind-config.json`.
+ *
+ * Scope: this config is consumed by /room when spawning child Pi processes per
+ * mind. /mind direct-chat does NOT apply `model`, `fallbackModels`, or `tools`
+ * because direct-chat runs inside the parent Pi session and inherits its model
+ * and tool surface by design. See AGENTS.md "Mind rules" for the contract.
+ *
  * Returns undefined if the file is missing, malformed JSON, or contains no
  * recognizable fields. Malformed individual fields silently coerce to
  * undefined (matches the project pattern: don't block room activation on
@@ -178,10 +195,9 @@ export function loadMindContext(
 export function loadMindConfig(
 	cwd: string,
 	inputSlug: string,
-	options: { config?: GenesisConfig } = {},
 ): MindConfig | undefined {
 	const slug = normalizeMindSlug(inputSlug);
-	const config = options.config ?? loadGenesisConfig(cwd);
+	const config = loadGenesisConfig(cwd);
 	const paths = resolveGenesisPaths(cwd, slug, config);
 	const configPath = path.join(paths.mindPath, MIND_CONFIG_FILE);
 	assertInsideProject(paths.cwd, configPath, "mindConfigPath");

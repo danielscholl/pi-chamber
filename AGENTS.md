@@ -63,6 +63,15 @@ Do not bypass Genesis authoring rules. Live `/genesis` requests run in a child P
 - Generated shims should remain compatible with `pi-subagents` frontmatter and should instruct agents to read shared IDEA doctrine plus their mind files at task start.
 - `mind` reads and injects shared IDEA doctrine plus existing mind files for direct chat in the main session; it must not bypass the Genesis write helper during live `/genesis` authoring.
 
+## Mind rules
+
+- `/mind` activates a Genesis mind in the current main Pi session via system-prompt injection at every `before_agent_start`. There is no child Pi process; the mind's persona, durable memory, rules, log, and shared doctrine are appended to the parent session's system prompt.
+- Mind files are re-read every turn so that edits to `memory.md`, `rules.md`, or `log.md` become live on the next turn. Do not cache.
+- `/mind` does **not** apply `mind-config.json` (`tools`, `model`, `fallbackModels`). That file is consumed only by `/room` when spawning per-mind child Pi processes. Direct-chat inherits the parent session's tool surface and model by design: direct-chat *is* the parent session. If a mind needs restricted tools or a specific model, run it inside a room.
+- When session control is available (`newSession` / `switchSession`), `/mind <slug>` opens a dedicated session and `/exit` switches back to the parent. When session control is unavailable, activation modifies the current session in place.
+- After `/exit`, the next `before_agent_start` injects a one-shot "Mind Mode Off" guard naming the previously-active mind, then clears. Subsequent turns run with the unmodified base system prompt. Returning from a dedicated mind session to its parent does not inject the guard at all — the parent transcript never adopted the mind's voice.
+- Slugs that exact-match a `/mind` subcommand keyword (`help`, `list`, `create`, `new`) are reserved by `normalizeMindSlug` so such names cannot become discoverable minds. `off` is intentionally not reserved.
+
 ## Room rules
 
 - Keep v1 project-local. The room extension owns each turn directly and spawns child `pi --mode json -p --no-session --no-extensions` processes per mind for real A2A streaming. Do **not** route through the parent-assistant `subagent` tool.

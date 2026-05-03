@@ -643,4 +643,68 @@ describe("mind extension", () => {
 			);
 		});
 	});
+
+	test("Mind Mode Off guard fires once then sunsets", async () => {
+		await withTempProject(async (cwd) => {
+			writeCompleteMind(cwd, "miss-moneypenny");
+			const harness = createHarness();
+			const ctx = createContext(cwd);
+
+			await harness.commands.get("mind")?.handler("miss-moneypenny", ctx);
+			await harness.commands.get("exit")?.handler("", ctx);
+
+			const first = (await runHandler(
+				harness,
+				"before_agent_start",
+				{ systemPrompt: "base" },
+				ctx,
+			)) as { systemPrompt: string };
+			const second = await runHandler(
+				harness,
+				"before_agent_start",
+				{ systemPrompt: "base" },
+				ctx,
+			);
+			const third = await runHandler(
+				harness,
+				"before_agent_start",
+				{ systemPrompt: "base" },
+				ctx,
+			);
+
+			expect(first.systemPrompt).toContain("# Genesis Mind Mode Off");
+			// After the first fire, the guard is consumed: the model has been
+			// told once not to roleplay; further turns rely on base instructions.
+			expect(second).toBeUndefined();
+			expect(third).toBeUndefined();
+		});
+	});
+
+	test("returning from a dedicated mind session does not pollute the parent with a guard", async () => {
+		await withTempProject(async (cwd) => {
+			writeCompleteMind(cwd, "miss-moneypenny");
+			const entries = [
+				stateEntry(true, "miss-moneypenny", "/sessions/normal.jsonl"),
+			];
+			const harness = createHarness(entries);
+			const ctx = createContext(cwd, entries, {
+				sessionFile: "/sessions/mind.jsonl",
+				enableSessionControl: true,
+			});
+
+			await runHandler(harness, "session_start", { reason: "startup" }, ctx);
+			await harness.commands.get("exit")?.handler("", ctx);
+
+			// After /exit triggers switchSession back to the parent, the parent
+			// session never had this mind active in its own transcript, so the
+			// next before_agent_start should not inject any guard.
+			const result = await runHandler(
+				harness,
+				"before_agent_start",
+				{ systemPrompt: "base" },
+				ctx,
+			);
+			expect(result).toBeUndefined();
+		});
+	});
 });
