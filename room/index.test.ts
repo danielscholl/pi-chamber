@@ -346,8 +346,11 @@ describe("room extension", () => {
 				const command = harness.commands.get("room");
 				expect(
 					command?.getArgumentCompletions?.("")?.map((i) => i.value),
-				).toEqual(["status", "list", "help"]);
+				).toEqual(["status", "list", "reset", "help"]);
 				expect(command?.getArgumentCompletions?.("o")).toEqual(null);
+				expect(
+					command?.getArgumentCompletions?.("re")?.map((i) => i.value),
+				).toEqual(["reset"]);
 			} finally {
 				process.chdir(originalCwd);
 			}
@@ -471,6 +474,69 @@ describe("room extension", () => {
 				expect.objectContaining({
 					type: "error",
 					message: expect.stringContaining("Unknown or incomplete"),
+				}),
+			);
+		});
+	});
+
+	test("/room reset with no args and no active room warns the user", async () => {
+		await withTempProject(async (cwd) => {
+			writeCompleteMind(cwd, "ariadne");
+			const harness = createHarness();
+			const ctx = createContext(cwd);
+
+			await harness.commands.get("room")?.handler("reset", ctx);
+
+			expect(ctx.notifications[0]).toEqual(
+				expect.objectContaining({
+					type: "warning",
+					message: expect.stringContaining("No active room"),
+				}),
+			);
+		});
+	});
+
+	test("/room reset <slug> drops per-mind sessions and reports the count", async () => {
+		await withTempProject(async (cwd) => {
+			writeCompleteMind(cwd, "ariadne");
+			const sessionsDir = path.join(cwd, ".pi/rooms/daily/sessions");
+			fs.mkdirSync(sessionsDir, { recursive: true });
+			fs.writeFileSync(
+				path.join(sessionsDir, "ariadne.session.jsonl"),
+				"{}",
+				"utf-8",
+			);
+			fs.writeFileSync(
+				path.join(sessionsDir, "mycroft.session.jsonl"),
+				"{}",
+				"utf-8",
+			);
+
+			const harness = createHarness();
+			const ctx = createContext(cwd);
+			await harness.commands.get("room")?.handler("reset daily", ctx);
+
+			expect(ctx.notifications[0]).toEqual(
+				expect.objectContaining({
+					type: "info",
+					message: expect.stringContaining("Dropped 2 per-mind session"),
+				}),
+			);
+			expect(fs.existsSync(sessionsDir)).toBe(false);
+		});
+	});
+
+	test("/room reset <slug> with no sessions reports zero", async () => {
+		await withTempProject(async (cwd) => {
+			writeCompleteMind(cwd, "ariadne");
+			const harness = createHarness();
+			const ctx = createContext(cwd);
+			await harness.commands.get("room")?.handler("reset daily", ctx);
+
+			expect(ctx.notifications[0]).toEqual(
+				expect.objectContaining({
+					type: "info",
+					message: expect.stringContaining("No per-mind sessions to drop"),
 				}),
 			);
 		});
@@ -943,6 +1009,181 @@ describe("room extension", () => {
 					message: expect.stringContaining("next speaker = mycroft"),
 				}),
 			);
+		});
+	});
+
+	test("/next rejects the saved-room synthesizer (it would silently no-op during routing)", async () => {
+		await withTempProject(async (cwd) => {
+			writeCompleteMind(cwd, "ariadne");
+			writeCompleteMind(cwd, "mycroft");
+			// Hand-craft a saved room where ariadne IS a participant AND the
+			// designated synthesizer.
+			const roomDir = path.join(cwd, ".pi/rooms/board");
+			fs.mkdirSync(roomDir, { recursive: true });
+			const now = new Date().toISOString();
+			fs.writeFileSync(
+				path.join(roomDir, "room.json"),
+				JSON.stringify({
+					slug: "board",
+					name: "board",
+					mode: "group-chat",
+					participants: ["ariadne", "mycroft"],
+					createdAt: now,
+					updatedAt: now,
+					synthesizer: "ariadne",
+				}),
+				"utf-8",
+			);
+			// Activate "board" via session_start restore so activeRoom.slug === "board".
+			const entries = [
+				roomStateEntry({
+					active: true,
+					mode: "group-chat",
+					participants: ["ariadne", "mycroft"],
+					slug: "board",
+					name: "board",
+				}),
+			];
+			const harness = createHarness();
+			const ctx = createContext(cwd, entries);
+			await runHandler(harness, "session_start", { reason: "startup" }, ctx);
+			ctx.notifications.length = 0;
+
+			await harness.commands.get("next")?.handler("ariadne", ctx);
+
+			expect(ctx.notifications[ctx.notifications.length - 1]).toEqual(
+				expect.objectContaining({
+					type: "error",
+					message: expect.stringContaining("active moderator"),
+				}),
+			);
+		});
+	});
+
+	test("/next accepts the non-moderator participant when synthesizer is set", async () => {
+		await withTempProject(async (cwd) => {
+			writeCompleteMind(cwd, "ariadne");
+			writeCompleteMind(cwd, "mycroft");
+			const roomDir = path.join(cwd, ".pi/rooms/board");
+			fs.mkdirSync(roomDir, { recursive: true });
+			const now = new Date().toISOString();
+			fs.writeFileSync(
+				path.join(roomDir, "room.json"),
+				JSON.stringify({
+					slug: "board",
+					name: "board",
+					mode: "group-chat",
+					participants: ["ariadne", "mycroft"],
+					createdAt: now,
+					updatedAt: now,
+					synthesizer: "ariadne",
+				}),
+				"utf-8",
+			);
+			const entries = [
+				roomStateEntry({
+					active: true,
+					mode: "group-chat",
+					participants: ["ariadne", "mycroft"],
+					slug: "board",
+					name: "board",
+				}),
+			];
+			const harness = createHarness();
+			const ctx = createContext(cwd, entries);
+			await runHandler(harness, "session_start", { reason: "startup" }, ctx);
+			ctx.notifications.length = 0;
+
+			await harness.commands.get("next")?.handler("mycroft", ctx);
+
+			expect(ctx.notifications[ctx.notifications.length - 1]).toEqual(
+				expect.objectContaining({
+					type: "info",
+					message: expect.stringContaining("next speaker = mycroft"),
+				}),
+			);
+		});
+	});
+
+	test("session_start with a synthesizer puts that mind in the participant widget as moderator", async () => {
+		await withTempProject(async (cwd) => {
+			writeCompleteMind(cwd, "ariadne");
+			writeCompleteMind(cwd, "mycroft");
+			// Hand-craft a saved room with mycroft as the synthesizer (so the
+			// chairman is replaced by a participant Genesis mind).
+			const roomDir = path.join(cwd, ".pi/rooms/board");
+			fs.mkdirSync(roomDir, { recursive: true });
+			const now = new Date().toISOString();
+			fs.writeFileSync(
+				path.join(roomDir, "room.json"),
+				JSON.stringify({
+					slug: "board",
+					name: "board",
+					mode: "group-chat",
+					participants: ["ariadne", "mycroft"],
+					createdAt: now,
+					updatedAt: now,
+					synthesizer: "mycroft",
+				}),
+				"utf-8",
+			);
+			const entries = [
+				roomStateEntry({
+					active: true,
+					mode: "group-chat",
+					participants: ["ariadne", "mycroft"],
+					slug: "board",
+					name: "board",
+				}),
+			];
+			const harness = createHarness();
+			const ctx = createContext(cwd, entries);
+			await runHandler(harness, "session_start", { reason: "startup" }, ctx);
+			const lastWidget = ctx.widgets[ctx.widgets.length - 1];
+			const widgetText = (lastWidget?.content as string[]).join(" ");
+			expect(widgetText).toContain("ariadne");
+			expect(widgetText).toContain("mycroft");
+			expect(widgetText).toContain("(mod)");
+		});
+	});
+
+	test("session_start in group-chat without a synthesizer surfaces chairman in the widget", async () => {
+		await withTempProject(async (cwd) => {
+			writeCompleteMind(cwd, "ariadne");
+			writeCompleteMind(cwd, "mycroft");
+			const roomDir = path.join(cwd, ".pi/rooms/board");
+			fs.mkdirSync(roomDir, { recursive: true });
+			const now = new Date().toISOString();
+			fs.writeFileSync(
+				path.join(roomDir, "room.json"),
+				JSON.stringify({
+					slug: "board",
+					name: "board",
+					mode: "group-chat",
+					participants: ["ariadne", "mycroft"],
+					createdAt: now,
+					updatedAt: now,
+				}),
+				"utf-8",
+			);
+			const entries = [
+				roomStateEntry({
+					active: true,
+					mode: "group-chat",
+					participants: ["ariadne", "mycroft"],
+					slug: "board",
+					name: "board",
+				}),
+			];
+			const harness = createHarness();
+			const ctx = createContext(cwd, entries);
+			await runHandler(harness, "session_start", { reason: "startup" }, ctx);
+			const lastWidget = ctx.widgets[ctx.widgets.length - 1];
+			const widgetText = (lastWidget?.content as string[]).join(" ");
+			// Chairman is the implicit moderator and should be tracked so
+			// mid-round status updates can find a tracker for it.
+			expect(widgetText).toContain("chairman");
+			expect(widgetText).toContain("(mod)");
 		});
 	});
 

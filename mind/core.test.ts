@@ -14,7 +14,9 @@ import { createMindStructure, resolveGenesisPaths } from "../genesis/core.ts";
 import {
 	buildMindModeSystemPrompt,
 	listGenesisMinds,
+	loadMindConfig,
 	loadMindContext,
+	MIND_CONFIG_FILE,
 	normalizeMindSlug,
 	validateMindModeFiles,
 } from "./core.ts";
@@ -158,6 +160,87 @@ describe("loadMindContext", () => {
 			expect(() => loadMindContext(cwd, "incomplete")).toThrow(
 				/Genesis mind "incomplete" is not ready for \/mind/,
 			);
+		});
+	});
+});
+
+describe("loadMindConfig", () => {
+	function writeMindConfig(cwd: string, slug: string, body: unknown): void {
+		const paths = resolveGenesisPaths(cwd, slug);
+		fs.mkdirSync(paths.mindPath, { recursive: true });
+		fs.writeFileSync(
+			path.join(paths.mindPath, MIND_CONFIG_FILE),
+			typeof body === "string" ? body : JSON.stringify(body),
+			"utf-8",
+		);
+	}
+
+	test("returns parsed config when present and well-formed", () => {
+		withTempProject((cwd) => {
+			writeCompleteMind(cwd, "ariadne");
+			writeMindConfig(cwd, "ariadne", {
+				tools: ["read", "grep"],
+				model: "openai/gpt-4o",
+				fallbackModels: ["anthropic/claude-sonnet-4"],
+			});
+			expect(loadMindConfig(cwd, "ariadne")).toEqual({
+				tools: ["read", "grep"],
+				model: "openai/gpt-4o",
+				fallbackModels: ["anthropic/claude-sonnet-4"],
+			});
+		});
+	});
+
+	test("returns undefined when the file is missing", () => {
+		withTempProject((cwd) => {
+			writeCompleteMind(cwd, "ariadne");
+			expect(loadMindConfig(cwd, "ariadne")).toBeUndefined();
+		});
+	});
+
+	test("returns undefined when the JSON is malformed", () => {
+		withTempProject((cwd) => {
+			writeCompleteMind(cwd, "ariadne");
+			writeMindConfig(cwd, "ariadne", "{not json");
+			expect(loadMindConfig(cwd, "ariadne")).toBeUndefined();
+		});
+	});
+
+	test("drops malformed individual fields silently", () => {
+		withTempProject((cwd) => {
+			writeCompleteMind(cwd, "ariadne");
+			writeMindConfig(cwd, "ariadne", {
+				tools: "read,grep",
+				model: 42,
+				fallbackModels: ["", "valid"],
+			});
+			expect(loadMindConfig(cwd, "ariadne")).toEqual({
+				fallbackModels: ["valid"],
+			});
+		});
+	});
+
+	test("drops empty tools entries and dedupes", () => {
+		withTempProject((cwd) => {
+			writeCompleteMind(cwd, "ariadne");
+			writeMindConfig(cwd, "ariadne", {
+				tools: ["read", "", "read", "bad name", "mcp:chrome"],
+			});
+			expect(loadMindConfig(cwd, "ariadne")).toEqual({
+				tools: ["read", "mcp:chrome"],
+			});
+		});
+	});
+
+	test("returns undefined when no field survives validation", () => {
+		withTempProject((cwd) => {
+			writeCompleteMind(cwd, "ariadne");
+			writeMindConfig(cwd, "ariadne", {
+				tools: [],
+				model: "",
+				fallbackModels: [""],
+			});
+			expect(loadMindConfig(cwd, "ariadne")).toBeUndefined();
 		});
 	});
 });

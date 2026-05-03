@@ -13,9 +13,10 @@ import path from "node:path";
 import {
 	appendRoomTranscriptTurn,
 	buildRoomHistoryFromEntries,
-	buildRoomSystemPrompt,
 	deleteSavedRoom,
+	dropRoomSessions,
 	latestRoomState,
+	listRoomSessions,
 	listSavedRooms,
 	mergeRoomHistory,
 	normalizeParticipantInput,
@@ -25,10 +26,13 @@ import {
 	readRoomTranscript,
 	readRoomTranscriptHeader,
 	readSavedRoom,
+	resolveRoomSessionPath,
+	resolveRoomSessionsDir,
 	TRANSCRIPT_FORMAT_VERSION,
 	resolveRoomParticipants,
 	resolveSavedRoomPaths,
 	type SavedRoom,
+	safeReadSavedRoom,
 	validateRoomState,
 	writeSavedRoom,
 	xmlEscape,
@@ -61,6 +65,22 @@ function activeState(overrides: Partial<RoomState> = {}): RoomState {
 		mode: "concurrent",
 		participants: ["ariadne", "mycroft"],
 		...overrides,
+	};
+}
+
+/** Build a V2 transcript turn shaped like the V1 single-blob equivalent.
+ * Used to keep legacy-shape transcript tests readable. */
+function v2TurnFromV1(
+	user: string,
+	assistant: string,
+	ts: string,
+): import("./core.ts").RoomTranscriptTurnV2 {
+	return {
+		version: 2,
+		user,
+		mode: "concurrent",
+		ts,
+		turns: [{ speaker: "room", role: "speaker", content: assistant }],
 	};
 }
 
@@ -119,6 +139,23 @@ describe("parseRoomArgs", () => {
 			expect.objectContaining({ type: "error" }),
 		);
 	});
+
+	test("recognizes reset with and without a slug", () => {
+		expect(parseRoomArgs("reset")).toEqual({ type: "reset" });
+		expect(parseRoomArgs("reset design-review")).toEqual({
+			type: "reset",
+			slug: "design-review",
+		});
+	});
+
+	test("rejects reset with non-canonical slug", () => {
+		expect(parseRoomArgs("reset Bad Slug")).toEqual(
+			expect.objectContaining({ type: "error" }),
+		);
+		expect(parseRoomArgs("reset BAD")).toEqual(
+			expect.objectContaining({ type: "error" }),
+		);
+	});
 });
 
 describe("normalizeParticipantInput", () => {
@@ -174,7 +211,7 @@ describe("xmlEscape", () => {
 });
 
 describe("validateRoomState", () => {
-	test("validates participants and mode; group-chat strips moderator (chairman is built-in)", () => {
+	test("validates participants and mode; group-chat is supported (chairman is built-in)", () => {
 		withTempProject((cwd) => {
 			writeCompleteMind(cwd, "ariadne");
 			writeCompleteMind(cwd, "mycroft");
@@ -188,16 +225,10 @@ describe("validateRoomState", () => {
 			);
 			const group = validateRoomState(
 				cwd,
-				activeState({ mode: "group-chat", moderator: undefined }),
+				activeState({ mode: "group-chat" }),
 			);
 			expect(group.ok).toBe(true);
-			expect(group.state?.moderator).toBeUndefined();
-			const legacy = validateRoomState(
-				cwd,
-				activeState({ mode: "group-chat", moderator: "outside" }),
-			);
-			expect(legacy.ok).toBe(true);
-			expect(legacy.state?.moderator).toBeUndefined();
+			expect(group.state?.mode).toBe("group-chat");
 		});
 	});
 });
@@ -409,11 +440,15 @@ describe("transcript IO", () => {
 				updatedAt: new Date().toISOString(),
 			});
 			for (let i = 0; i < 60; i++) {
-				appendRoomTranscriptTurn(cwd, "daily", {
-					user: `u${i}`,
-					assistant: `a${i}`,
-					ts: new Date(Date.UTC(2026, 0, 1, 0, i)).toISOString(),
-				});
+				appendRoomTranscriptTurn(
+					cwd,
+					"daily",
+					v2TurnFromV1(
+						`u${i}`,
+						`a${i}`,
+						new Date(Date.UTC(2026, 0, 1, 0, i)).toISOString(),
+					),
+				);
 			}
 			const turns = readRoomTranscript(cwd, "daily");
 			expect(turns).toHaveLength(50);
@@ -458,11 +493,11 @@ describe("transcript IO", () => {
 				createdAt: new Date().toISOString(),
 				updatedAt: new Date().toISOString(),
 			});
-			appendRoomTranscriptTurn(cwd, "headered", {
-				user: "u1",
-				assistant: "a1",
-				ts: "2026-05-02T00:00:00.000Z",
-			});
+			appendRoomTranscriptTurn(
+				cwd,
+				"headered",
+				v2TurnFromV1("u1", "a1", "2026-05-02T00:00:00.000Z"),
+			);
 
 			const { transcriptPath } = resolveSavedRoomPaths(cwd, "headered");
 			const lines = fs
@@ -477,7 +512,15 @@ describe("transcript IO", () => {
 				roomSlug: "headered",
 			});
 			expect(typeof header.createdAt).toBe("string");
-			expect(JSON.parse(lines[1])).toMatchObject({ user: "u1", assistant: "a1" });
+			const turnLine = JSON.parse(lines[1]);
+			expect(turnLine).toMatchObject({
+				version: 2,
+				user: "u1",
+				mode: "concurrent",
+			});
+			expect(turnLine.turns).toEqual([
+				{ speaker: "room", role: "speaker", content: "a1" },
+			]);
 		});
 	});
 
@@ -493,11 +536,15 @@ describe("transcript IO", () => {
 				updatedAt: new Date().toISOString(),
 			});
 			for (let i = 0; i < 3; i++) {
-				appendRoomTranscriptTurn(cwd, "single-header", {
-					user: `u${i}`,
-					assistant: `a${i}`,
-					ts: new Date(Date.UTC(2026, 4, 2, 0, i)).toISOString(),
-				});
+				appendRoomTranscriptTurn(
+					cwd,
+					"single-header",
+					v2TurnFromV1(
+						`u${i}`,
+						`a${i}`,
+						new Date(Date.UTC(2026, 4, 2, 0, i)).toISOString(),
+					),
+				);
 			}
 
 			const { transcriptPath } = resolveSavedRoomPaths(cwd, "single-header");
@@ -529,11 +576,15 @@ describe("transcript IO", () => {
 				updatedAt: new Date().toISOString(),
 			});
 			for (let i = 0; i < 3; i++) {
-				appendRoomTranscriptTurn(cwd, "skip-header", {
-					user: `u${i}`,
-					assistant: `a${i}`,
-					ts: new Date(Date.UTC(2026, 4, 2, 0, i)).toISOString(),
-				});
+				appendRoomTranscriptTurn(
+					cwd,
+					"skip-header",
+					v2TurnFromV1(
+						`u${i}`,
+						`a${i}`,
+						new Date(Date.UTC(2026, 4, 2, 0, i)).toISOString(),
+					),
+				);
 			}
 			const turns = readRoomTranscript(cwd, "skip-header");
 			expect(turns).toHaveLength(3);
@@ -576,11 +627,11 @@ describe("transcript IO", () => {
 				createdAt: new Date().toISOString(),
 				updatedAt: new Date().toISOString(),
 			});
-			appendRoomTranscriptTurn(cwd, "with-header", {
-				user: "u",
-				assistant: "a",
-				ts: "2026-05-02T00:00:00.000Z",
-			});
+			appendRoomTranscriptTurn(
+				cwd,
+				"with-header",
+				v2TurnFromV1("u", "a", "2026-05-02T00:00:00.000Z"),
+			);
 			const header = readRoomTranscriptHeader(cwd, "with-header");
 			expect(header).toBeDefined();
 			expect(header?._meta).toBe(true);
@@ -623,14 +674,14 @@ describe("transcript IO", () => {
 });
 
 describe("mergeRoomHistory", () => {
-	test("pads from transcript when session rounds are short of target", () => {
+	test("pads from transcript (V2) when session rounds are short of target", () => {
 		const session = [{ user: "now", assistant: "now-answer" }];
 		const transcript = [
-			{ user: "old", assistant: "old-answer", ts: "" },
-			{ user: "older", assistant: "older-answer", ts: "" },
+			v2TurnFromV1("old", "old-answer", ""),
+			v2TurnFromV1("older", "older-answer", ""),
 		];
 		expect(mergeRoomHistory(session, transcript, 2)).toEqual([
-			{ user: "older", assistant: "older-answer" },
+			{ user: "older", assistant: "[room]\nolder-answer" },
 			{ user: "now", assistant: "now-answer" },
 		]);
 	});
@@ -646,50 +697,388 @@ describe("mergeRoomHistory", () => {
 			{ user: "c", assistant: "3" },
 		]);
 	});
+
+	test("flattens multi-speaker V2 turns into per-speaker assistant blob", () => {
+		const transcript: import("./core.ts").RoomTranscriptTurnV2[] = [
+			{
+				version: 2,
+				user: "what next?",
+				mode: "group-chat",
+				ts: "",
+				turns: [
+					{ speaker: "ariadne", role: "speaker", content: "do A" },
+					{ speaker: "mycroft", role: "speaker", content: "do B" },
+				],
+			},
+		];
+		expect(mergeRoomHistory([], transcript, 1)).toEqual([
+			{ user: "what next?", assistant: "[ariadne]\ndo A\n\n[mycroft]\ndo B" },
+		]);
+	});
 });
 
-describe("buildRoomSystemPrompt", () => {
-	test("includes concurrent routing contract and history hygiene", () => {
-		const prompt = buildRoomSystemPrompt({
-			state: activeState(),
-			history: [
-				{ user: "old", assistant: "old answer" },
-				{ user: "first <ask>", assistant: "answer & one" },
-				{ user: "second", assistant: `answer "two"` },
-			],
-		});
+describe("saved room optional fields", () => {
+	function makeRoom(overrides: Partial<SavedRoom> = {}): SavedRoom {
+		const now = new Date().toISOString();
+		return {
+			slug: "design-review",
+			name: "Design Review",
+			mode: "concurrent",
+			participants: ["ariadne", "mycroft"],
+			createdAt: now,
+			updatedAt: now,
+			...overrides,
+		};
+	}
 
-		expect(prompt).toContain("subagent");
-		expect(prompt).toContain('context: "fresh"');
-		expect(prompt).toContain('agentScope: "project"');
-		expect(prompt).toContain("- Mode: concurrent");
-		expect(prompt).toContain("- ariadne");
-		expect(prompt).toContain("concurrency: 2");
-		expect(prompt).toContain("At most the last two visible room rounds");
-		expect(prompt).toContain("first &lt;ask&gt;");
-		expect(prompt).not.toContain("<user>old</user>");
-		expect(prompt).toContain("Strip control JSON");
-		expect(prompt).toContain("Handoff and magentic are future modes only");
+	test("round-trips groupChat, synthesizer, concurrentSynthesis, and forkPerMind", () => {
+		withTempProject((cwd) => {
+			writeCompleteMind(cwd, "ariadne");
+			writeCompleteMind(cwd, "mycroft");
+			writeSavedRoom(
+				cwd,
+				makeRoom({
+					groupChat: { maxTurns: 8, minRounds: 2, maxSpeakerRepeats: 3 },
+					synthesizer: "ariadne",
+					concurrentSynthesis: "chairman",
+					forkPerMind: true,
+				}),
+			);
+			const read = readSavedRoom(cwd, "design-review");
+			expect(read.groupChat).toEqual({
+				maxTurns: 8,
+				minRounds: 2,
+				maxSpeakerRepeats: 3,
+			});
+			expect(read.synthesizer).toBe("ariadne");
+			expect(read.concurrentSynthesis).toBe("chairman");
+			expect(read.forkPerMind).toBe(true);
+		});
 	});
 
-	test("includes sequential and group-chat mode-specific instructions", () => {
-		const sequential = buildRoomSystemPrompt({
-			state: activeState({ mode: "sequential" }),
+	test("rooms without optional fields read as undefined", () => {
+		withTempProject((cwd) => {
+			writeCompleteMind(cwd, "ariadne");
+			writeCompleteMind(cwd, "mycroft");
+			writeSavedRoom(cwd, makeRoom());
+			const read = readSavedRoom(cwd, "design-review");
+			expect(read.groupChat).toBeUndefined();
+			expect(read.synthesizer).toBeUndefined();
+			expect(read.concurrentSynthesis).toBeUndefined();
+			expect(read.forkPerMind).toBeUndefined();
 		});
-		expect(sequential).toContain("chain: [{ agent, task }, ...]");
-		expect(sequential).toContain("Each later mind must see prior responses");
+	});
 
-		const groupChat = buildRoomSystemPrompt({
-			state: activeState({ mode: "group-chat" }),
+	test("malformed optional fields silently coerce to undefined", () => {
+		withTempProject((cwd) => {
+			writeCompleteMind(cwd, "ariadne");
+			writeCompleteMind(cwd, "mycroft");
+			// Hand-craft a room.json with bogus optional fields to bypass writer normalization.
+			const { roomDir, configPath } = resolveSavedRoomPaths(cwd, "design-review");
+			fs.mkdirSync(roomDir, { recursive: true });
+			const now = new Date().toISOString();
+			fs.writeFileSync(
+				configPath,
+				JSON.stringify({
+					slug: "design-review",
+					name: "Design Review",
+					mode: "concurrent",
+					participants: ["ariadne", "mycroft"],
+					createdAt: now,
+					updatedAt: now,
+					groupChat: { maxTurns: "eight", minRounds: -1 },
+					synthesizer: 42,
+					concurrentSynthesis: "Bad Slug",
+					forkPerMind: "yes",
+				}),
+				"utf-8",
+			);
+			const read = readSavedRoom(cwd, "design-review");
+			expect(read.groupChat).toBeUndefined();
+			expect(read.synthesizer).toBeUndefined();
+			expect(read.concurrentSynthesis).toBeUndefined();
+			expect(read.forkPerMind).toBeUndefined();
 		});
-		expect(groupChat).toContain("strict JSON speaker selection");
-		expect(groupChat).toContain(
-			"The active participant slug list: ariadne, mycroft",
-		);
-		expect(groupChat).toContain('agent: "chairman"');
-		expect(groupChat).toContain("Moderator: chairman");
-		expect(groupChat).toContain("Active participant slugs: ariadne, mycroft");
-		expect(groupChat).toContain("next_speaker as exactly one of those slugs");
-		expect(groupChat).toContain("maximum turns 4");
+	});
+
+	test("partially malformed groupChat keeps valid fields and drops invalid ones", () => {
+		withTempProject((cwd) => {
+			writeCompleteMind(cwd, "ariadne");
+			writeCompleteMind(cwd, "mycroft");
+			const { roomDir, configPath } = resolveSavedRoomPaths(cwd, "design-review");
+			fs.mkdirSync(roomDir, { recursive: true });
+			const now = new Date().toISOString();
+			fs.writeFileSync(
+				configPath,
+				JSON.stringify({
+					slug: "design-review",
+					name: "Design Review",
+					mode: "concurrent",
+					participants: ["ariadne", "mycroft"],
+					createdAt: now,
+					updatedAt: now,
+					groupChat: { maxTurns: 6, minRounds: "bad", maxSpeakerRepeats: 2 },
+				}),
+				"utf-8",
+			);
+			const read = readSavedRoom(cwd, "design-review");
+			expect(read.groupChat).toEqual({ maxTurns: 6, maxSpeakerRepeats: 2 });
+		});
+	});
+
+	test("safeReadSavedRoom returns undefined on missing or malformed config", () => {
+		withTempProject((cwd) => {
+			expect(safeReadSavedRoom(cwd, "nonexistent")).toBeUndefined();
+			const { roomDir, configPath } = resolveSavedRoomPaths(cwd, "broken");
+			fs.mkdirSync(roomDir, { recursive: true });
+			fs.writeFileSync(configPath, "{not json", "utf-8");
+			expect(safeReadSavedRoom(cwd, "broken")).toBeUndefined();
+		});
+	});
+});
+
+describe("V2 transcript shape", () => {
+	test("appendRoomTranscriptTurn writes per-speaker structured turns", () => {
+		withTempProject((cwd) => {
+			writeCompleteMind(cwd, "ariadne");
+			writeCompleteMind(cwd, "mycroft");
+			writeSavedRoom(cwd, {
+				slug: "v2",
+				name: "v2",
+				mode: "group-chat",
+				participants: ["ariadne", "mycroft"],
+				createdAt: new Date().toISOString(),
+				updatedAt: new Date().toISOString(),
+			});
+			appendRoomTranscriptTurn(cwd, "v2", {
+				version: 2,
+				user: "thoughts?",
+				mode: "group-chat",
+				durationMs: 1234,
+				ts: "2026-05-03T00:00:00.000Z",
+				turns: [
+					{
+						speaker: "ariadne",
+						role: "speaker",
+						content: "lean A",
+						turnNumber: 1,
+						paletteIndex: 0,
+					},
+					{
+						speaker: "chairman",
+						role: "synthesis",
+						content: "consensus: A",
+						turnNumber: 2,
+						paletteIndex: 4,
+					},
+				],
+			});
+			const turns = readRoomTranscript(cwd, "v2");
+			expect(turns).toHaveLength(1);
+			expect(turns[0].user).toBe("thoughts?");
+			expect(turns[0].mode).toBe("group-chat");
+			expect(turns[0].durationMs).toBe(1234);
+			expect(turns[0].turns.map((t) => t.speaker)).toEqual([
+				"ariadne",
+				"chairman",
+			]);
+			expect(turns[0].turns[1].role).toBe("synthesis");
+		});
+	});
+
+	test("readRoomTranscript lifts V1 legacy lines into V2 shape", () => {
+		withTempProject((cwd) => {
+			writeCompleteMind(cwd, "ariadne");
+			writeSavedRoom(cwd, {
+				slug: "legacy-v1",
+				name: "legacy-v1",
+				mode: "concurrent",
+				participants: ["ariadne"],
+				createdAt: new Date().toISOString(),
+				updatedAt: new Date().toISOString(),
+			});
+			const { roomDir, transcriptPath } = resolveSavedRoomPaths(cwd, "legacy-v1");
+			fs.mkdirSync(roomDir, { recursive: true });
+			fs.writeFileSync(
+				transcriptPath,
+				`${JSON.stringify({ user: "u0", assistant: "a0", ts: "" })}\n${JSON.stringify({ user: "u1", assistant: "a1", ts: "" })}\n`,
+				"utf-8",
+			);
+			const turns = readRoomTranscript(cwd, "legacy-v1");
+			expect(turns).toHaveLength(2);
+			expect(turns[0].turns[0]).toEqual({
+				speaker: "room",
+				role: "speaker",
+				content: "a0",
+			});
+		});
+	});
+
+	test("readRoomTranscript drops V2 lines whose inner turns are malformed", () => {
+		withTempProject((cwd) => {
+			writeCompleteMind(cwd, "ariadne");
+			writeSavedRoom(cwd, {
+				slug: "bad-inner",
+				name: "bad-inner",
+				mode: "concurrent",
+				participants: ["ariadne"],
+				createdAt: new Date().toISOString(),
+				updatedAt: new Date().toISOString(),
+			});
+			const { roomDir, transcriptPath } = resolveSavedRoomPaths(
+				cwd,
+				"bad-inner",
+			);
+			fs.mkdirSync(roomDir, { recursive: true });
+			// One well-formed V2 turn, then several malformed ones, then another good turn.
+			const lines = [
+				JSON.stringify({
+					_meta: true,
+					v: 2,
+					roomSlug: "bad-inner",
+					createdAt: "",
+				}),
+				JSON.stringify({
+					version: 2,
+					user: "good-1",
+					mode: "concurrent",
+					ts: "",
+					turns: [{ speaker: "ariadne", role: "speaker", content: "ok" }],
+				}),
+				// Inner turn is a primitive
+				JSON.stringify({
+					version: 2,
+					user: "bad-primitive",
+					mode: "concurrent",
+					ts: "",
+					turns: [1],
+				}),
+				// Inner turn missing required fields
+				JSON.stringify({
+					version: 2,
+					user: "bad-missing",
+					mode: "concurrent",
+					ts: "",
+					turns: [{ content: 5 }],
+				}),
+				// Inner turn has invalid role
+				JSON.stringify({
+					version: 2,
+					user: "bad-role",
+					mode: "concurrent",
+					ts: "",
+					turns: [
+						{ speaker: "ariadne", role: "narrator", content: "x" },
+					],
+				}),
+				JSON.stringify({
+					version: 2,
+					user: "good-2",
+					mode: "concurrent",
+					ts: "",
+					turns: [{ speaker: "ariadne", role: "speaker", content: "ok2" }],
+				}),
+			];
+			fs.writeFileSync(transcriptPath, `${lines.join("\n")}\n`, "utf-8");
+			const turns = readRoomTranscript(cwd, "bad-inner");
+			expect(turns.map((t) => t.user)).toEqual(["good-1", "good-2"]);
+		});
+	});
+
+	test("readRoomTranscript handles mixed V1+V2 lines in one file", () => {
+		withTempProject((cwd) => {
+			writeCompleteMind(cwd, "ariadne");
+			writeSavedRoom(cwd, {
+				slug: "mixed",
+				name: "mixed",
+				mode: "concurrent",
+				participants: ["ariadne"],
+				createdAt: new Date().toISOString(),
+				updatedAt: new Date().toISOString(),
+			});
+			const { roomDir, transcriptPath } = resolveSavedRoomPaths(cwd, "mixed");
+			fs.mkdirSync(roomDir, { recursive: true });
+			fs.writeFileSync(
+				transcriptPath,
+				`${JSON.stringify({ _meta: true, v: 1, roomSlug: "mixed", createdAt: "" })}\n${JSON.stringify({ user: "u0", assistant: "old-blob", ts: "" })}\n${JSON.stringify({ version: 2, user: "u1", mode: "concurrent", ts: "", turns: [{ speaker: "ariadne", role: "speaker", content: "new" }] })}\n`,
+				"utf-8",
+			);
+			const turns = readRoomTranscript(cwd, "mixed");
+			expect(turns).toHaveLength(2);
+			expect(turns[0].turns[0].speaker).toBe("room");
+			expect(turns[0].turns[0].content).toBe("old-blob");
+			expect(turns[1].turns[0].speaker).toBe("ariadne");
+			expect(turns[1].turns[0].content).toBe("new");
+		});
+	});
+});
+
+describe("room session path helpers", () => {
+	test("resolveRoomSessionPath returns the expected location", () => {
+		withTempProject((cwd) => {
+			const sessionPath = resolveRoomSessionPath(cwd, "design-review", "ariadne");
+			expect(sessionPath).toBe(
+				path.join(cwd, ".pi/rooms/design-review/sessions/ariadne.session.jsonl"),
+			);
+			expect(resolveRoomSessionsDir(cwd, "design-review")).toBe(
+				path.join(cwd, ".pi/rooms/design-review/sessions"),
+			);
+		});
+	});
+
+	test("rejects non-canonical slugs", () => {
+		withTempProject((cwd) => {
+			expect(() =>
+				resolveRoomSessionPath(cwd, "design-review", "Bad Slug"),
+			).toThrow(/Invalid mind slug/);
+			expect(() => resolveRoomSessionPath(cwd, "Bad Room", "ariadne")).toThrow(
+				/Invalid room slug/,
+			);
+		});
+	});
+
+	test("listRoomSessions returns sorted slugs and ignores non-session files", () => {
+		withTempProject((cwd) => {
+			const sessionsDir = path.join(cwd, ".pi/rooms/daily/sessions");
+			fs.mkdirSync(sessionsDir, { recursive: true });
+			fs.writeFileSync(
+				path.join(sessionsDir, "mycroft.session.jsonl"),
+				"{}",
+				"utf-8",
+			);
+			fs.writeFileSync(
+				path.join(sessionsDir, "ariadne.session.jsonl"),
+				"{}",
+				"utf-8",
+			);
+			fs.writeFileSync(path.join(sessionsDir, "README.md"), "# notes", "utf-8");
+			expect(listRoomSessions(cwd, "daily")).toEqual(["ariadne", "mycroft"]);
+		});
+	});
+
+	test("listRoomSessions returns [] when the dir does not exist", () => {
+		withTempProject((cwd) => {
+			expect(listRoomSessions(cwd, "missing")).toEqual([]);
+		});
+	});
+
+	test("dropRoomSessions removes the directory and reports the count", () => {
+		withTempProject((cwd) => {
+			const sessionsDir = path.join(cwd, ".pi/rooms/daily/sessions");
+			fs.mkdirSync(sessionsDir, { recursive: true });
+			fs.writeFileSync(
+				path.join(sessionsDir, "ariadne.session.jsonl"),
+				"{}",
+				"utf-8",
+			);
+			fs.writeFileSync(
+				path.join(sessionsDir, "mycroft.session.jsonl"),
+				"{}",
+				"utf-8",
+			);
+			expect(dropRoomSessions(cwd, "daily")).toBe(2);
+			expect(fs.existsSync(sessionsDir)).toBe(false);
+			expect(dropRoomSessions(cwd, "daily")).toBe(0);
+		});
 	});
 });

@@ -2,6 +2,7 @@
 // @ts-ignore
 import { describe, expect, test } from "bun:test";
 import {
+	buildConcurrentSynthesisPrompt,
 	buildModeratorPrompt,
 	buildSpeakerPrompt,
 	buildSynthesisPrompt,
@@ -152,6 +153,38 @@ describe("buildSynthesisPrompt", () => {
 		expect(out).toContain("<group-chat-synthesis");
 		expect(out).toContain("jarvis");
 		expect(out).toContain("Speak in your own voice");
+	});
+});
+
+describe("buildConcurrentSynthesisPrompt", () => {
+	test("uses concurrent-synthesis wrapper and notes parallel takes", () => {
+		const out = buildConcurrentSynthesisPrompt({
+			moderatorSlug: "chairman",
+			participants: ["ariadne", "mycroft"],
+			userMessage: "ship?",
+			transcript: [
+				{ speaker: "ariadne", content: "yes" },
+				{ speaker: "mycroft", content: "no" },
+			],
+		});
+		expect(out).toContain("<concurrent-synthesis");
+		expect(out).toContain("<takes>");
+		expect(out).toContain("answered the same question independently");
+		expect(out).toContain("chairman");
+		expect(out).toContain("ariadne");
+		expect(out).toContain("mycroft");
+	});
+
+	test("escapes XML-sensitive content in takes", () => {
+		const out = buildConcurrentSynthesisPrompt({
+			moderatorSlug: "chairman",
+			participants: ["a"],
+			userMessage: "test <thing>",
+			transcript: [{ speaker: "a", content: "use <tag> & 'quote'" }],
+		});
+		expect(out).toContain("test &lt;thing&gt;");
+		expect(out).toContain("&lt;tag&gt;");
+		expect(out).toContain("&amp;");
 	});
 });
 

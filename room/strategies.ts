@@ -8,10 +8,12 @@
  */
 
 import {
+	buildConcurrentSynthesisPrompt,
 	buildModeratorPrompt,
 	buildSpeakerPrompt,
 	buildSynthesisPrompt,
 	type ChamberHistoryTurn,
+	CHAIRMAN_SLUG,
 	type ModeratorDecision,
 	type ModeratorPhase,
 	parseModeratorDecision,
@@ -32,6 +34,8 @@ export type MindSpec = {
 	persona: string;
 	paletteIndex: number;
 	model?: string;
+	fallbackModels?: string[];
+	tools?: string[];
 };
 
 export type SpeechRole = "speaker" | "moderator" | "synthesis";
@@ -42,8 +46,14 @@ export type SpawnRequest = {
 	prompt: string;
 	cwd: string;
 	model?: string;
+	fallbackModels?: string[];
+	tools?: string[];
 	signal: AbortSignal;
 	onDelta: (delta: string) => void;
+	/** Optional hook the wrapper calls before each spawn attempt (including
+	 * the first). Used to reset streaming buffers so retry exhaustion never
+	 * surfaces concatenated deltas from multiple attempts. */
+	onAttemptStart?: (modelLabel: string) => void;
 };
 
 export type SpawnFn = (req: SpawnRequest) => Promise<SpawnMindResult>;
@@ -65,6 +75,13 @@ export type OrchestrationContext = {
 		turnNumber?: number,
 	) => string; // returns messageId
 	emitMindDelta: (messageId: string, slug: string, delta: string) => void;
+	/**
+	 * Optional hook the strategy wires up so the host can reset its per-message
+	 * streaming buffer when a fallback retry begins. Without this, retry
+	 * exhaustion can surface concatenated deltas from multiple attempts as a
+	 * single garbled reply.
+	 */
+	emitMindReset?: (messageId: string, slug: string) => void;
 	emitMindEnd: (
 		messageId: string,
 		slug: string,
@@ -109,6 +126,11 @@ export type StrategyInput = {
 	roundHistory: ChamberHistoryTurn[]; // prior rounds (capped externally)
 	context: OrchestrationContext;
 	groupChatConfig?: GroupChatConfig;
+	/** When set and not "off", concurrent mode appends a synthesis turn from
+	 * the named mind after the parallel speakers finish. The slug "chairman"
+	 * uses the built-in synthetic moderator; any other slug must be present
+	 * in `mindsBySlug`. */
+	synthesisConfig?: { mode: "off" | "chairman" | string };
 };
 
 export type GroupChatConfig = {
@@ -180,9 +202,13 @@ async function executeConcurrent(
 				prompt,
 				cwd: input.context.cwd,
 				model: mind.model,
+				fallbackModels: mind.fallbackModels,
+				tools: mind.tools,
 				signal: input.context.signal,
 				onDelta: (delta) =>
 					input.context.emitMindDelta(messageId, mind.slug, delta),
+				onAttemptStart: () =>
+					input.context.emitMindReset?.(messageId, mind.slug),
 			});
 			input.context.emitMindEnd(messageId, mind.slug, "speaker", result);
 			return { mind, result };
@@ -200,10 +226,68 @@ async function executeConcurrent(
 		});
 	}
 
+	// Optional synthesis turn: a single named mind summarizes the parallel
+	// takes. Default off for backward compatibility — set
+	// `synthesisConfig.mode` to "chairman" or a participant slug to enable.
+	const synthMode = input.synthesisConfig?.mode;
+	if (
+		synthMode &&
+		synthMode !== "off" &&
+		!input.context.signal.aborted &&
+		transcript.length > 0
+	) {
+		const synthSlug = synthMode;
+		const synthMind = input.mindsBySlug.get(synthSlug);
+		if (synthMind) {
+			const synthTurnNumber = speakers.length + 1;
+			const messageId = input.context.emitMindStart(
+				synthMind.slug,
+				"synthesis",
+				synthTurnNumber,
+			);
+			const synthPrompt = buildConcurrentSynthesisPrompt({
+				moderatorSlug: synthMind.slug,
+				participants: input.participantOrder,
+				userMessage: input.userMessage,
+				transcript,
+			});
+			const synthResult = await input.context.spawn({
+				slug: synthMind.slug,
+				persona: synthMind.persona,
+				prompt: synthPrompt,
+				cwd: input.context.cwd,
+				model: synthMind.model,
+				fallbackModels: synthMind.fallbackModels,
+				tools: synthMind.tools,
+				signal: input.context.signal,
+				onDelta: (delta) =>
+					input.context.emitMindDelta(messageId, synthMind.slug, delta),
+				onAttemptStart: () =>
+					input.context.emitMindReset?.(messageId, synthMind.slug),
+			});
+			input.context.emitMindEnd(
+				messageId,
+				synthMind.slug,
+				"synthesis",
+				synthResult,
+				synthTurnNumber,
+			);
+			usageTotal.input += synthResult.usage.input;
+			usageTotal.output += synthResult.usage.output;
+			usageTotal.cost += synthResult.usage.cost;
+			transcript.push({
+				speaker: synthMind.slug,
+				content: synthResult.finalText,
+				turnNumber: synthTurnNumber,
+				isModerator: true,
+			});
+		}
+	}
+
 	const durationMs = Date.now() - start;
 	const metrics = {
 		mode: input.mode,
-		turns: speakers.length,
+		turns: transcript.length,
 		speakers: speakers.length,
 		durationMs,
 		usage: usageTotal,
@@ -250,9 +334,13 @@ async function executeSequential(
 			prompt,
 			cwd: input.context.cwd,
 			model: mind.model,
+			fallbackModels: mind.fallbackModels,
+			tools: mind.tools,
 			signal: input.context.signal,
 			onDelta: (delta) =>
 				input.context.emitMindDelta(messageId, mind.slug, delta),
+			onAttemptStart: () =>
+				input.context.emitMindReset?.(messageId, mind.slug),
 		});
 		input.context.emitMindEnd(messageId, mind.slug, "speaker", result, i + 1);
 		usageTotal.input += result.usage.input;
@@ -364,6 +452,8 @@ async function executeGroupChat(
 				prompt,
 				cwd: input.context.cwd,
 				model: moderator.model,
+				fallbackModels: moderator.fallbackModels,
+				tools: moderator.tools,
 				signal: input.context.signal,
 				onDelta: () => {
 					/* hidden — no streaming */
@@ -403,9 +493,13 @@ async function executeGroupChat(
 			prompt,
 			cwd: input.context.cwd,
 			model: mind.model,
+			fallbackModels: mind.fallbackModels,
+			tools: mind.tools,
 			signal: input.context.signal,
 			onDelta: (delta) =>
 				input.context.emitMindDelta(messageId, mind.slug, delta),
+			onAttemptStart: () =>
+				input.context.emitMindReset?.(messageId, mind.slug),
 		});
 		input.context.emitMindEnd(
 			messageId,
@@ -519,9 +613,13 @@ async function executeGroupChat(
 				prompt: synthPrompt,
 				cwd: input.context.cwd,
 				model: moderator.model,
+				fallbackModels: moderator.fallbackModels,
+				tools: moderator.tools,
 				signal: input.context.signal,
 				onDelta: (delta) =>
 					input.context.emitMindDelta(synthMsgId, moderatorSlug, delta),
+				onAttemptStart: () =>
+					input.context.emitMindReset?.(synthMsgId, moderatorSlug),
 			});
 			input.context.emitMindEnd(
 				synthMsgId,

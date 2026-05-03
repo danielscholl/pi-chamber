@@ -15,6 +15,13 @@ import {
 } from "../genesis/core.ts";
 
 export const DEFAULT_LOG_MAX_CHARS = 8000;
+export const MIND_CONFIG_FILE = "mind-config.json";
+
+export type MindConfig = {
+	tools?: string[];
+	model?: string;
+	fallbackModels?: string[];
+};
 
 export type MindModePaths = {
 	mindPath: string;
@@ -159,6 +166,75 @@ export function loadMindContext(
 		log: logResult.content.trim(),
 		logTruncated: logResult.truncated,
 	};
+}
+
+/**
+ * Load optional per-mind config from `.pi/minds/<slug>/mind-config.json`.
+ * Returns undefined if the file is missing, malformed JSON, or contains no
+ * recognizable fields. Malformed individual fields silently coerce to
+ * undefined (matches the project pattern: don't block room activation on
+ * misshapen optional config).
+ */
+export function loadMindConfig(
+	cwd: string,
+	inputSlug: string,
+	options: { config?: GenesisConfig } = {},
+): MindConfig | undefined {
+	const slug = normalizeMindSlug(inputSlug);
+	const config = options.config ?? loadGenesisConfig(cwd);
+	const paths = resolveGenesisPaths(cwd, slug, config);
+	const configPath = path.join(paths.mindPath, MIND_CONFIG_FILE);
+	assertInsideProject(paths.cwd, configPath, "mindConfigPath");
+	if (!existsSync(configPath)) return undefined;
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(readFileSync(configPath, "utf-8"));
+	} catch {
+		return undefined;
+	}
+	if (!parsed || typeof parsed !== "object") return undefined;
+	const raw = parsed as Record<string, unknown>;
+	const out: MindConfig = {};
+	const tools = coerceToolsList(raw.tools);
+	if (tools) out.tools = tools;
+	const model = coerceNonEmptyString(raw.model);
+	if (model) out.model = model;
+	const fallbackModels = coerceStringList(raw.fallbackModels);
+	if (fallbackModels) out.fallbackModels = fallbackModels;
+	return Object.keys(out).length > 0 ? out : undefined;
+}
+
+const TOOL_NAME_PATTERN = /^[a-zA-Z0-9_:-]+$/;
+
+function coerceToolsList(value: unknown): string[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const seen = new Set<string>();
+	const out: string[] = [];
+	for (const item of value) {
+		if (typeof item !== "string") continue;
+		const trimmed = item.trim();
+		if (!trimmed || !TOOL_NAME_PATTERN.test(trimmed)) continue;
+		if (seen.has(trimmed)) continue;
+		seen.add(trimmed);
+		out.push(trimmed);
+	}
+	return out.length > 0 ? out : undefined;
+}
+
+function coerceNonEmptyString(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const trimmed = value.trim();
+	return trimmed || undefined;
+}
+
+function coerceStringList(value: unknown): string[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const out: string[] = [];
+	for (const item of value) {
+		const trimmed = coerceNonEmptyString(item);
+		if (trimmed) out.push(trimmed);
+	}
+	return out.length > 0 ? out : undefined;
 }
 
 export function buildMindModeSystemPrompt(context: LoadedMindContext): string {

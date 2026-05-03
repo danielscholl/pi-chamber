@@ -187,6 +187,26 @@ export function buildSynthesisPrompt(
 	return xml;
 }
 
+/** Build a synthesis prompt for concurrent mode where each participant
+ * answered the same question in parallel. The wrapper differs from group-chat
+ * synthesis so the synthesizer knows there was no back-and-forth: every
+ * participant spoke once and independently. */
+export function buildConcurrentSynthesisPrompt(
+	input: BuildSynthesisPromptInput,
+): string {
+	const participantNames = input.participants.join(", ");
+	let xml = `<concurrent-synthesis participants="${xmlEscape(participantNames)}">\n`;
+	xml += `  <user-question>${xmlEscape(input.userMessage)}</user-question>\n`;
+	xml += `  <takes>\n`;
+	for (const turn of input.transcript) {
+		xml += `    <take speaker="${xmlEscape(turn.speaker)}">${xmlEscape(stripControlJson(turn.content))}</take>\n`;
+	}
+	xml += `  </takes>\n`;
+	xml += `  <instruction>You are ${xmlEscape(input.moderatorSlug)} acting as the synthesizer. Each participant answered the same question independently — there was no back-and-forth. Identify points of convergence, where they meaningfully diverge, and recommend a path forward. Be concise. Speak in your own voice.</instruction>\n`;
+	xml += `</concurrent-synthesis>`;
+	return xml;
+}
+
 /** Extract the outermost JSON object from text using bracket counting. */
 export function extractJsonObject(text: string): string | null {
 	const start = text.indexOf("{");

@@ -85,6 +85,12 @@ export type SpawnMindResult = {
 	errorMessage?: string;
 	aborted: boolean;
 	durationMs: number;
+	/**
+	 * Models attempted for this logical spawn, in order. The last entry is the
+	 * model that produced the returned result. Always populated by `spawnMind`;
+	 * single-call helpers may omit it.
+	 */
+	attemptedModels?: string[];
 };
 
 export type SpawnDeltaCallback = (delta: string) => void;
@@ -102,12 +108,32 @@ export type SpawnMindOptions = {
 	cwd: string;
 	/** Optional model override (e.g., "github-copilot/gpt-5.5"). */
 	model?: string;
+	/**
+	 * Optional ordered list of fallback model ids tried when the primary model
+	 * fails with a retryable error. The retry loop is wired in PR 3; PR 2
+	 * accepts the field so per-mind configuration can be propagated end-to-end.
+	 */
+	fallbackModels?: string[];
 	/** Optional comma-separated tools list. */
 	tools?: string[];
+	/**
+	 * When set, the child runs with `--session <path>` and shares state across
+	 * spawns by reading/writing this file. When undefined (default), the child
+	 * runs with `--no-session` (cold spawn each time). The file is created on
+	 * first use by the child's SessionManager.
+	 */
+	sessionFile?: string;
 	/** Abort signal — sends SIGTERM, then SIGKILL after killGraceMs. */
 	signal?: AbortSignal;
 	/** Token-level streaming callback. */
 	onDelta?: SpawnDeltaCallback;
+	/**
+	 * Fired by `spawnMind` (the retry-aware wrapper) before each attempt
+	 * begins, including the first. The host should reset any per-attempt
+	 * streaming buffers it keeps so partial deltas from a failed primary
+	 * cannot leak into the displayed reply when a retry exhausts.
+	 */
+	onAttemptStart?: (modelLabel: string) => void;
 	/** Fired when the child emits message_end for an assistant message. */
 	onMessage?: SpawnMessageCallback;
 	/** Fired for every parsed NDJSON event (escape hatch for callers that need it). */
@@ -215,15 +241,193 @@ export function getPiInvocation(args: string[]): { command: string; args: string
 	return { command: "pi", args };
 }
 
+/**
+ * Compose the argv array for a `pi --mode json -p ...` invocation.
+ *
+ * Pure helper extracted for testability. The persona file (`--append-system-prompt`)
+ * and the trailing prompt are appended by `spawnMindOnce` after persona-temp-file
+ * resolution; this helper only emits the leading flags so call sites can verify
+ * argv composition without I/O.
+ */
+export function composeSpawnArgs(
+	options: Pick<
+		SpawnMindOptions,
+		"model" | "tools" | "sessionFile" | "noChildExtensions"
+	>,
+	modelOverride?: string,
+): string[] {
+	const args: string[] = ["--mode", "json", "-p"];
+	if (options.sessionFile) {
+		args.push("--session", options.sessionFile);
+	} else {
+		args.push("--no-session");
+	}
+	if (options.noChildExtensions !== false) args.push("--no-extensions");
+	const model = modelOverride ?? options.model;
+	if (model) args.push("--model", model);
+	if (options.tools && options.tools.length > 0)
+		args.push("--tools", options.tools.join(","));
+	return args;
+}
+
+/**
+ * Returns true when a failed spawn result is eligible for a fallback-model retry.
+ *
+ * Retry policy: only retry when the child reported a model-side error (exit code
+ * non-zero AND the assistant message carried `stopReason: "error"`). Specifically
+ * NOT retried:
+ *   - aborted runs (the user hit /halt — they want the abort to land)
+ *   - exit code 0 (success, even if the text seems off)
+ *   - non-zero exit without `stopReason: "error"` (process crash or config issue,
+ *     not a transient model failure that a different model could overcome)
+ */
+export function shouldRetry(result: SpawnMindResult): boolean {
+	if (result.aborted) return false;
+	if (result.exitCode === 0) return false;
+	if (result.stopReason !== "error") return false;
+	return true;
+}
+
+export type SessionFileSnapshot = {
+	path: string;
+	existed: boolean;
+	content: Buffer | undefined;
+};
+
+/** Snapshot a sessionFile's pre-attempt state (existence + bytes) so we can
+ * restore it before retrying a fallback. Used internally by `spawnMind` to
+ * keep retries from polluting durable per-mind sessions when `forkPerMind`
+ * is enabled. Returns undefined if the path is unset. */
+export function snapshotSessionFile(
+	p: string | undefined,
+): SessionFileSnapshot | undefined {
+	if (!p) return undefined;
+	if (!fs.existsSync(p)) return { path: p, existed: false, content: undefined };
+	try {
+		return { path: p, existed: true, content: fs.readFileSync(p) };
+	} catch {
+		return { path: p, existed: false, content: undefined };
+	}
+}
+
+export function restoreSessionFile(
+	snap: SessionFileSnapshot | undefined,
+): void {
+	if (!snap) return;
+	try {
+		if (!snap.existed) {
+			if (fs.existsSync(snap.path)) fs.unlinkSync(snap.path);
+		} else if (snap.content) {
+			fs.writeFileSync(snap.path, snap.content);
+		}
+	} catch {
+		// Best-effort: a failed restore leaves the file as the failed attempt
+		// wrote it. The wrapper still produces a result; the user can reset
+		// per-mind sessions via `/room reset` if continuity is broken.
+	}
+}
+
+/**
+ * Outer wrapper: try `options.model`, then fall back to each entry in
+ * `options.fallbackModels` in turn until one succeeds or none are eligible.
+ *
+ * `attemptedModels` is populated in order; the last entry corresponds to the
+ * returned result. The returned result's `model` field reflects the actual
+ * model that produced the response.
+ *
+ * Cost, duration, message log, and stderr are **aggregated across attempts**
+ * so the round metrics (and per-mind detail card) reflect the total work
+ * done for this logical spawn rather than only the last attempt's slice.
+ * `finalText`, `model`, `aborted`, `stopReason`, `errorMessage`, and
+ * `exitCode` come from the last attempt because that's the response the
+ * caller will display.
+ *
+ * When `sessionFile` is set (forked per-mind sessions), the wrapper
+ * snapshots the file before the first attempt and restores it before
+ * each retry so the fallback starts from the same context the primary
+ * did and a failed primary's partial session writes do not pollute future
+ * turns. `onAttemptStart` is invoked before each attempt so the host can
+ * reset any per-attempt streaming buffers.
+ */
 export async function spawnMind(
 	options: SpawnMindOptions,
 ): Promise<SpawnMindResult> {
+	const attemptedModels: string[] = [];
+	const initialModel = options.model;
+	const fallbacks = options.fallbackModels ?? [];
+	const aggregateUsage: MindUsage = {
+		input: 0,
+		output: 0,
+		cacheRead: 0,
+		cacheWrite: 0,
+		cost: 0,
+		contextTokens: 0,
+		turns: 0,
+	};
+	const aggregateMessages: MindMessage[] = [];
+	let aggregateStderr = "";
+	let totalDurationMs = 0;
+	let lastResult: SpawnMindResult | undefined;
+
+	// Snapshot only when retries are even possible. Single-attempt spawns skip
+	// the I/O cost.
+	const snapshot =
+		fallbacks.length > 0 ? snapshotSessionFile(options.sessionFile) : undefined;
+
+	const tryModel = async (override?: string): Promise<SpawnMindResult> => {
+		const label = override ?? initialModel ?? "default";
+		attemptedModels.push(label);
+		try {
+			options.onAttemptStart?.(label);
+		} catch {
+			/* swallow */
+		}
+		const result = await spawnMindOnce(options, override);
+		aggregateUsage.input += result.usage.input;
+		aggregateUsage.output += result.usage.output;
+		aggregateUsage.cacheRead += result.usage.cacheRead;
+		aggregateUsage.cacheWrite += result.usage.cacheWrite;
+		aggregateUsage.cost += result.usage.cost;
+		aggregateUsage.turns += result.usage.turns;
+		// contextTokens is a snapshot of the active context window, not a sum.
+		aggregateUsage.contextTokens = result.usage.contextTokens;
+		aggregateMessages.push(...result.messages);
+		aggregateStderr += result.stderr;
+		totalDurationMs += result.durationMs;
+		lastResult = result;
+		return result;
+	};
+
+	let result = await tryModel(undefined);
+	for (const fallback of fallbacks) {
+		if (!shouldRetry(result)) break;
+		// Restore the per-mind session file to its pre-attempt state so the
+		// fallback starts fresh. Any partial bytes the failed attempt wrote
+		// are discarded.
+		restoreSessionFile(snapshot);
+		result = await tryModel(fallback);
+	}
+	const final = lastResult ?? result;
+	return {
+		...final,
+		usage: aggregateUsage,
+		messages: aggregateMessages,
+		stderr: aggregateStderr,
+		durationMs: totalDurationMs,
+		attemptedModels,
+	};
+}
+
+/**
+ * Single-shot spawn: launches one child Pi process, streams NDJSON, and
+ * returns the result. Use `spawnMind` for the retry-aware wrapper.
+ */
+export async function spawnMindOnce(
+	options: SpawnMindOptions,
+	modelOverride?: string,
+): Promise<SpawnMindResult> {
 	const startedAt = Date.now();
-	const args: string[] = ["--mode", "json", "-p", "--no-session"];
-	if (options.noChildExtensions !== false) args.push("--no-extensions");
-	if (options.model) args.push("--model", options.model);
-	if (options.tools && options.tools.length > 0)
-		args.push("--tools", options.tools.join(","));
+	const args: string[] = composeSpawnArgs(options, modelOverride);
 
 	let tmpPersonaDir: string | null = null;
 	let tmpPersonaPath: string | null = null;
@@ -239,7 +443,7 @@ export async function spawnMind(
 		contextTokens: 0,
 		turns: 0,
 	};
-	let model: string | undefined = options.model;
+	let model: string | undefined = modelOverride ?? options.model;
 	let stopReason: string | undefined;
 	let errorMessage: string | undefined;
 	const killGraceMs = options.killGraceMs ?? DEFAULT_KILL_GRACE_MS;

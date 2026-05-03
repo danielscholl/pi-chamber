@@ -24,8 +24,10 @@ export const ROOM_STATE_CUSTOM_TYPE = "room-state";
 export const ROOMS_BASE_DIR = ".pi/rooms";
 export const SAVED_ROOM_CONFIG_FILE = "room.json";
 export const SAVED_ROOM_TRANSCRIPT_FILE = "transcript.jsonl";
+export const ROOM_SESSIONS_DIR = "sessions";
+export const ROOM_SESSION_FILE_SUFFIX = ".session.jsonl";
 export const DEFAULT_TRANSCRIPT_REPLAY_TURNS = 50;
-export const TRANSCRIPT_FORMAT_VERSION = 1;
+export const TRANSCRIPT_FORMAT_VERSION = 2;
 
 export type RoomMode = (typeof ROOM_MODES)[number];
 
@@ -33,7 +35,6 @@ export type RoomState = {
 	active: boolean;
 	mode: RoomMode | string;
 	participants: string[];
-	moderator?: string;
 	slug?: string;
 	name?: string;
 	activatedAt?: string;
@@ -45,14 +46,23 @@ export type RoomState = {
 	returnSessionFile?: string;
 };
 
+export type GroupChatOverrides = {
+	maxTurns?: number;
+	minRounds?: number;
+	maxSpeakerRepeats?: number;
+};
+
 export type SavedRoom = {
 	slug: string;
 	name: string;
 	mode: RoomMode;
 	participants: string[];
-	moderator?: string;
 	createdAt: string;
 	updatedAt: string;
+	groupChat?: GroupChatOverrides;
+	synthesizer?: string;
+	concurrentSynthesis?: boolean | "chairman" | string;
+	forkPerMind?: boolean;
 };
 
 export type SavedRoomSummary = {
@@ -60,7 +70,6 @@ export type SavedRoomSummary = {
 	name: string;
 	mode: RoomMode;
 	participants: string[];
-	moderator?: string;
 	createdAt: string;
 	updatedAt: string;
 	problems: string[];
@@ -110,6 +119,7 @@ export type RoomCommand =
 	| { type: "clear" }
 	| { type: "mode"; mode: RoomMode }
 	| { type: "minds"; participants: string }
+	| { type: "reset"; slug?: string }
 	| { type: "error"; message: string };
 
 export type RoomValidationResult = {
@@ -121,11 +131,6 @@ export type RoomValidationResult = {
 export type RoomHistoryRound = {
 	user: string;
 	assistant: string;
-};
-
-export type BuildRoomPromptInput = {
-	state: RoomState;
-	history?: RoomHistoryRound[];
 };
 
 export type RoomSessionEntry = Record<string, unknown>;
@@ -180,11 +185,23 @@ export function parseRoomArgs(args: string): RoomCommand {
 			}
 			return { type: "minds", participants: rest.join(" ") };
 		}
+		case "reset": {
+			if (rest.length === 0) return { type: "reset" };
+			if (rest.length > 1) return tooManyArgs("reset");
+			const slug = rest[0];
+			if (!SLUG_PATTERN.test(slug)) {
+				return {
+					type: "error",
+					message: `Room slug must be canonical: got "${slug}".`,
+				};
+			}
+			return { type: "reset", slug };
+		}
 		default:
 			return {
 				type: "error",
 				message:
-					"Usage: /room [on|status|list|mode|minds|clear]. Use /exit to leave an active room. Supported v1 modes: concurrent, sequential, group-chat.",
+					"Usage: /room [on|status|list|mode|minds|reset|clear]. Use /exit to leave an active room. Supported v1 modes: concurrent, sequential, group-chat.",
 			};
 	}
 }
@@ -276,7 +293,6 @@ export function validateRoomState(
 			...state,
 			mode,
 			participants,
-			moderator: undefined,
 		},
 	};
 }
@@ -343,99 +359,6 @@ export function buildRoomHistoryFromEntries(
 	}
 
 	return rounds.slice(-Math.max(0, maxRounds));
-}
-
-/**
- * @deprecated Legacy system-prompt builder for the prompt-injection era. The
- * extension now owns each room turn directly via `on("input")` and spawns
- * child pi processes per mind, so the parent assistant never receives this
- * prompt. Kept exported for backward compatibility with external callers.
- */
-export function buildRoomSystemPrompt(input: BuildRoomPromptInput): string {
-	const state = input.state;
-	const participants = state.participants;
-	const participantList = participants.map((slug) => `- ${slug}`).join("\n");
-	const participantXml = participants
-		.map((slug) => `  <mind slug="${xmlEscape(slug)}" />`)
-		.join("\n");
-	const history = renderHistory(input.history ?? []);
-	const groupChatModerator = "chairman";
-
-	return `# Chamber-style Multi-mind Room Active
-
-Normal user prompts are chatroom messages for the active room. Slash commands still behave normally and must not be routed as room messages.
-
-You are the parent orchestration assistant. Do not answer as a participant, do not roleplay the Genesis minds, and do not fabricate participant responses. Route room messages to selected project Genesis minds with the existing \`subagent\` tool using \`context: "fresh"\` and \`agentScope: "project"\`.
-
-## Active room
-
-- Mode: ${state.mode}
-- Participants (${participants.length}):
-${participantList || "- none"}${state.mode === "group-chat" ? `\n- Moderator: ${groupChatModerator}` : ""}
-
-<room_participants>
-${participantXml}
-</room_participants>
-
-## Delegated task prompt contract
-
-Every task prompt sent to a mind must include:
-
-1. An identity prefix such as \`You are participating as <slug>, a Genesis mind in this Pi room.\`
-2. The current room mode: \`${state.mode}\`.
-3. The active participant slug list: ${participants.join(", ") || "none"}.
-4. The user's current room message.
-5. At most the last two visible room rounds in XML-escaped \`<chatroom_history>\`.
-
-Do not include hidden moderator control JSON in visible answers or future room history. Strip control JSON from the visible transcript/history.
-
-<chatroom_history>
-${history}
-</chatroom_history>
-
-## V1 routing rules
-
-### concurrent
-
-For concurrent mode, call all selected minds in parallel and then synthesize:
-
-\`subagent({ tasks: [{ agent, task }, ...], context: "fresh", agentScope: "project", concurrency: ${participants.length} })\`
-
-Use one task per participant. Present visible output as per-mind sections plus a concise synthesis.
-
-### sequential
-
-For sequential mode, call minds in participant order. Each later mind must see prior responses from the same round in its task prompt:
-
-\`subagent({ chain: [{ agent, task }, ...], context: "fresh", agentScope: "project", clarify: false })\`
-
-If finer control is needed, use explicit one-at-a-time \`subagent\` calls with \`context: "fresh"\` and \`agentScope: "project"\`. Present visible output as per-mind sections plus a concise synthesis.
-
-### group-chat
-
-For group-chat mode, ask the moderator mind (${groupChatModerator}) for strict JSON speaker selection, hide that JSON, call only the selected speaker mind, and repeat within these caps: minimum rounds ${DEFAULT_GROUP_CHAT_MIN_ROUNDS}, maximum turns ${DEFAULT_GROUP_CHAT_MAX_TURNS}, repeat cap ${DEFAULT_GROUP_CHAT_REPEAT_CAP}. Then ask the moderator for a synthesis. Moderator control prompts and responses are routing metadata, not visible transcript content.
-
-Required moderator control shape:
-
-\`subagent({ tasks: [{ agent: "${groupChatModerator}", task: "Active participant slugs: ${participants.join(", ")}. Return strict JSON choosing next_speaker as exactly one of those slugs and a brief reason." }], context: "fresh", agentScope: "project", concurrency: 1 })\`
-
-After selecting a speaker, call that speaker with \`context: "fresh"\` and \`agentScope: "project"\`, including the room message and visible history. Present visible output as per-mind sections plus a concise synthesis.
-
-## Future modes
-
-Handoff and magentic are future modes only. They are not accepted v1 room modes and must not be simulated unless a later extension explicitly enables them.`;
-}
-
-function renderHistory(history: RoomHistoryRound[]): string {
-	const recent = history.slice(-2);
-	if (recent.length === 0)
-		return "  <!-- no visible prior room rounds provided -->";
-	return recent
-		.map(
-			(round, index) =>
-				`  <round index="${index + 1}">\n    <user>${xmlEscape(round.user)}</user>\n    <assistant>${xmlEscape(round.assistant)}</assistant>\n  </round>`,
-		)
-		.join("\n");
 }
 
 function isRoomMode(value: string): value is RoomMode {
@@ -532,6 +455,69 @@ export function resolveSavedRoomPaths(
 	};
 }
 
+/**
+ * Resolve the directory under which per-mind session files live for a saved
+ * room: `.pi/rooms/<roomSlug>/sessions/`. Used by item-5 forked-per-mind mode.
+ */
+export function resolveRoomSessionsDir(cwd: string, roomSlug: string): string {
+	const { roomDir } = resolveSavedRoomPaths(cwd, roomSlug);
+	const sessionsDir = path.join(roomDir, ROOM_SESSIONS_DIR);
+	assertInsideProject(path.resolve(cwd), sessionsDir, "roomSessionsDir");
+	return sessionsDir;
+}
+
+/**
+ * Resolve the per-mind session file path inside a saved room:
+ * `.pi/rooms/<roomSlug>/sessions/<mindSlug>.session.jsonl`.
+ */
+export function resolveRoomSessionPath(
+	cwd: string,
+	roomSlug: string,
+	mindSlug: string,
+): string {
+	if (!SLUG_PATTERN.test(mindSlug)) {
+		throw new Error(`Invalid mind slug for room session: ${mindSlug}`);
+	}
+	const sessionsDir = resolveRoomSessionsDir(cwd, roomSlug);
+	const file = path.join(sessionsDir, `${mindSlug}${ROOM_SESSION_FILE_SUFFIX}`);
+	assertInsideProject(path.resolve(cwd), file, "roomSessionFile");
+	return file;
+}
+
+/** List mind slugs that currently have a session file in this saved room. */
+export function listRoomSessions(cwd: string, roomSlug: string): string[] {
+	let sessionsDir: string;
+	try {
+		sessionsDir = resolveRoomSessionsDir(cwd, roomSlug);
+	} catch {
+		return [];
+	}
+	if (!existsSync(sessionsDir)) return [];
+	const out: string[] = [];
+	for (const entry of readdirSync(sessionsDir)) {
+		if (!entry.endsWith(ROOM_SESSION_FILE_SUFFIX)) continue;
+		const slug = entry.slice(0, -ROOM_SESSION_FILE_SUFFIX.length);
+		if (SLUG_PATTERN.test(slug)) out.push(slug);
+	}
+	return out.sort();
+}
+
+/** Remove the per-mind session directory for this saved room. Returns the
+ * count of session files dropped (0 if the directory did not exist). */
+export function dropRoomSessions(cwd: string, roomSlug: string): number {
+	const before = listRoomSessions(cwd, roomSlug);
+	let sessionsDir: string;
+	try {
+		sessionsDir = resolveRoomSessionsDir(cwd, roomSlug);
+	} catch {
+		return 0;
+	}
+	if (existsSync(sessionsDir)) {
+		rmSync(sessionsDir, { recursive: true, force: true });
+	}
+	return before.length;
+}
+
 export function normalizeRoomSlug(input: string): string {
 	const trimmed = (input ?? "").trim();
 	if (!trimmed) {
@@ -561,6 +547,64 @@ export function isSavedRoomLike(value: unknown): value is SavedRoom {
 	);
 }
 
+function coerceGroupChatOverrides(value: unknown): GroupChatOverrides | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	const raw = value as Record<string, unknown>;
+	const out: GroupChatOverrides = {};
+	if (typeof raw.maxTurns === "number" && Number.isFinite(raw.maxTurns) && raw.maxTurns > 0) {
+		out.maxTurns = Math.floor(raw.maxTurns);
+	}
+	if (typeof raw.minRounds === "number" && Number.isFinite(raw.minRounds) && raw.minRounds > 0) {
+		out.minRounds = Math.floor(raw.minRounds);
+	}
+	if (
+		typeof raw.maxSpeakerRepeats === "number" &&
+		Number.isFinite(raw.maxSpeakerRepeats) &&
+		raw.maxSpeakerRepeats > 0
+	) {
+		out.maxSpeakerRepeats = Math.floor(raw.maxSpeakerRepeats);
+	}
+	return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function coerceSynthesizer(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const trimmed = value.trim();
+	return trimmed && SLUG_PATTERN.test(trimmed) ? trimmed : undefined;
+}
+
+function coerceConcurrentSynthesis(
+	value: unknown,
+): boolean | "chairman" | string | undefined {
+	if (typeof value === "boolean") return value;
+	if (typeof value !== "string") return undefined;
+	const trimmed = value.trim();
+	if (!trimmed) return undefined;
+	if (trimmed === "chairman") return "chairman";
+	return SLUG_PATTERN.test(trimmed) ? trimmed : undefined;
+}
+
+function coerceForkPerMind(value: unknown): boolean | undefined {
+	return typeof value === "boolean" ? value : undefined;
+}
+
+function applySavedRoomOptionals(
+	target: SavedRoom,
+	source: Partial<SavedRoom> | Record<string, unknown>,
+): SavedRoom {
+	const groupChat = coerceGroupChatOverrides((source as Record<string, unknown>).groupChat);
+	if (groupChat) target.groupChat = groupChat;
+	const synthesizer = coerceSynthesizer((source as Record<string, unknown>).synthesizer);
+	if (synthesizer) target.synthesizer = synthesizer;
+	const concurrentSynthesis = coerceConcurrentSynthesis(
+		(source as Record<string, unknown>).concurrentSynthesis,
+	);
+	if (concurrentSynthesis !== undefined) target.concurrentSynthesis = concurrentSynthesis;
+	const forkPerMind = coerceForkPerMind((source as Record<string, unknown>).forkPerMind);
+	if (forkPerMind !== undefined) target.forkPerMind = forkPerMind;
+	return target;
+}
+
 export function readSavedRoom(cwd: string, slug: string): SavedRoom {
 	const { configPath } = resolveSavedRoomPaths(cwd, slug);
 	if (!existsSync(configPath)) {
@@ -583,7 +627,28 @@ export function readSavedRoom(cwd: string, slug: string): SavedRoom {
 			`Saved room slug mismatch: file ${slug} contains slug "${parsed.slug}".`,
 		);
 	}
-	return parsed;
+	const base: SavedRoom = {
+		slug: parsed.slug,
+		name: parsed.name,
+		mode: parsed.mode,
+		participants: parsed.participants,
+		createdAt: parsed.createdAt,
+		updatedAt: parsed.updatedAt,
+	};
+	return applySavedRoomOptionals(base, parsed as Record<string, unknown>);
+}
+
+/**
+ * Read a saved room without throwing — returns undefined on any error.
+ * Useful in hot paths (per-turn config lookup) where missing or malformed
+ * config should fall back to defaults rather than abort the round.
+ */
+export function safeReadSavedRoom(cwd: string, slug: string): SavedRoom | undefined {
+	try {
+		return readSavedRoom(cwd, slug);
+	} catch {
+		return undefined;
+	}
 }
 
 export function writeSavedRoom(cwd: string, room: SavedRoom): SavedRoom {
@@ -606,6 +671,7 @@ export function writeSavedRoom(cwd: string, room: SavedRoom): SavedRoom {
 		createdAt: room.createdAt || new Date().toISOString(),
 		updatedAt: new Date().toISOString(),
 	};
+	applySavedRoomOptionals(normalized, room);
 	writeFileSync(
 		configPath,
 		`${JSON.stringify(normalized, null, 2)}\n`,
@@ -695,10 +761,19 @@ function isTranscriptHeaderLike(value: unknown): value is TranscriptHeader {
 	);
 }
 
+/**
+ * Append a V2 turn to the transcript. The V2 shape preserves per-speaker
+ * attribution which the prompt builder uses to render `<chatroom-history>`
+ * with real speaker slugs instead of a flat blob.
+ *
+ * On first append the file gets a single header line declaring the format
+ * version. Existing V1-shaped files are left untouched (no migration); the
+ * reader handles mixed shapes.
+ */
 export function appendRoomTranscriptTurn(
 	cwd: string,
 	slug: string,
-	turn: RoomTranscriptTurn,
+	turn: RoomTranscriptTurnV2,
 ): void {
 	const { roomDir, transcriptPath } = resolveSavedRoomPaths(cwd, slug);
 	mkdirSync(roomDir, { recursive: true });
@@ -707,11 +782,86 @@ export function appendRoomTranscriptTurn(
 		payload += `${JSON.stringify(buildTranscriptHeader(slug))}\n`;
 	}
 	payload += `${JSON.stringify({
+		version: 2,
 		user: turn.user,
-		assistant: turn.assistant,
+		turns: turn.turns,
+		mode: turn.mode,
+		...(typeof turn.durationMs === "number" ? { durationMs: turn.durationMs } : {}),
 		ts: turn.ts || new Date().toISOString(),
 	})}\n`;
 	appendFileSync(transcriptPath, payload, "utf-8");
+}
+
+/**
+ * Lift a V1 transcript line into V2 shape. V1 had a single flattened
+ * `assistant` text per round; we represent it as a single inner turn whose
+ * speaker is the synthetic slug `"room"` so that downstream consumers can
+ * uniformly walk V2 structure even for pre-upgrade transcripts.
+ */
+export function liftV1TurnToV2(turn: RoomTranscriptTurn): RoomTranscriptTurnV2 {
+	return {
+		version: 2,
+		user: turn.user,
+		mode: "concurrent",
+		ts: turn.ts || "",
+		turns: [
+			{
+				speaker: "room",
+				role: "speaker",
+				content: turn.assistant,
+			},
+		],
+	};
+}
+
+function isV2InnerTurnLike(value: unknown): boolean {
+	if (!value || typeof value !== "object") return false;
+	const t = value as Record<string, unknown>;
+	if (typeof t.speaker !== "string" || !t.speaker) return false;
+	if (typeof t.content !== "string") return false;
+	if (
+		t.role !== "speaker" &&
+		t.role !== "moderator" &&
+		t.role !== "synthesis"
+	)
+		return false;
+	if (
+		t.turnNumber !== undefined &&
+		(typeof t.turnNumber !== "number" || !Number.isFinite(t.turnNumber))
+	)
+		return false;
+	if (
+		t.paletteIndex !== undefined &&
+		(typeof t.paletteIndex !== "number" || !Number.isFinite(t.paletteIndex))
+	)
+		return false;
+	if (t.aborted !== undefined && typeof t.aborted !== "boolean") return false;
+	return true;
+}
+
+function isV2TurnLike(value: unknown): value is RoomTranscriptTurnV2 {
+	if (!value || typeof value !== "object") return false;
+	const candidate = value as Partial<RoomTranscriptTurnV2>;
+	if (
+		candidate.version !== 2 ||
+		typeof candidate.user !== "string" ||
+		typeof candidate.mode !== "string" ||
+		!Array.isArray(candidate.turns)
+	)
+		return false;
+	// Reject the whole line if any inner turn is malformed. The reader's
+	// contract is that bad lines are skipped silently rather than feeding
+	// undefined speaker/content into prompt rendering downstream.
+	return candidate.turns.every(isV2InnerTurnLike);
+}
+
+function isV1TurnLike(value: unknown): value is RoomTranscriptTurn {
+	if (!value || typeof value !== "object") return false;
+	const candidate = value as Partial<RoomTranscriptTurn>;
+	return (
+		typeof candidate.user === "string" &&
+		typeof candidate.assistant === "string"
+	);
 }
 
 export function readRoomTranscriptHeader(
@@ -731,30 +881,48 @@ export function readRoomTranscriptHeader(
 	}
 }
 
+/**
+ * Read a transcript and return turns in the V2 shape.
+ *
+ * Mixed-shape files are tolerated: V1 lines are lifted to V2 on the fly via
+ * `liftV1TurnToV2` so callers always see uniform structure. The header line
+ * (if present) is skipped. Malformed lines are dropped silently.
+ */
 export function readRoomTranscript(
 	cwd: string,
 	slug: string,
 	maxTurns = DEFAULT_TRANSCRIPT_REPLAY_TURNS,
-): RoomTranscriptTurn[] {
+): RoomTranscriptTurnV2[] {
 	const { transcriptPath } = resolveSavedRoomPaths(cwd, slug);
 	if (!existsSync(transcriptPath)) return [];
 	const raw = readFileSync(transcriptPath, "utf-8");
 	const lines = raw.split(/\r?\n/).filter((line) => line.trim().length > 0);
-	const turns: RoomTranscriptTurn[] = [];
+	const turns: RoomTranscriptTurnV2[] = [];
 	for (const line of lines) {
 		try {
 			const parsed = JSON.parse(line);
 			if (isTranscriptHeaderLike(parsed)) continue;
-			const turn = parsed as Partial<RoomTranscriptTurn>;
-			if (
-				typeof turn?.user === "string" &&
-				typeof turn?.assistant === "string"
-			) {
+			if (isV2TurnLike(parsed)) {
 				turns.push({
-					user: turn.user,
-					assistant: turn.assistant,
-					ts: typeof turn.ts === "string" ? turn.ts : "",
+					version: 2,
+					user: parsed.user,
+					turns: parsed.turns,
+					mode: parsed.mode,
+					...(typeof parsed.durationMs === "number"
+						? { durationMs: parsed.durationMs }
+						: {}),
+					ts: typeof parsed.ts === "string" ? parsed.ts : "",
 				});
+				continue;
+			}
+			if (isV1TurnLike(parsed)) {
+				turns.push(
+					liftV1TurnToV2({
+						user: parsed.user,
+						assistant: parsed.assistant,
+						ts: typeof parsed.ts === "string" ? parsed.ts : "",
+					}),
+				);
 			}
 		} catch {
 			// Skip malformed lines instead of failing the whole replay.
@@ -763,9 +931,29 @@ export function readRoomTranscript(
 	return turns.slice(-Math.max(0, maxTurns));
 }
 
+/** Flatten a V2 turn's per-speaker breakdown into a single assistant blob.
+ * Used by legacy callers that only know the V1 RoomHistoryRound shape. */
+export function flattenV2TurnToHistoryRound(
+	turn: RoomTranscriptTurnV2,
+): RoomHistoryRound {
+	const assistant = turn.turns
+		.map((t) => `[${t.speaker}]\n${t.content.trim()}`)
+		.join("\n\n");
+	return { user: turn.user, assistant };
+}
+
+/**
+ * Merge in-session rounds with persisted V2 transcript turns into a flat
+ * `RoomHistoryRound[]` for callers that only need the legacy shape.
+ *
+ * Session rounds win for the most-recent slot; older slots are padded from
+ * the tail of the disk transcript (flattened per-speaker turns into a
+ * single assistant blob). For per-speaker fidelity, prefer
+ * `selectPriorRoundsV2` directly.
+ */
 export function mergeRoomHistory(
 	sessionRounds: RoomHistoryRound[],
-	transcriptTurns: RoomTranscriptTurn[],
+	transcriptTurns: RoomTranscriptTurnV2[],
 	targetCount: number,
 ): RoomHistoryRound[] {
 	if (sessionRounds.length >= targetCount)
@@ -773,6 +961,6 @@ export function mergeRoomHistory(
 	const need = targetCount - sessionRounds.length;
 	const padded: RoomHistoryRound[] = transcriptTurns
 		.slice(-need)
-		.map((turn) => ({ user: turn.user, assistant: turn.assistant }));
+		.map(flattenV2TurnToHistoryRound);
 	return [...padded, ...sessionRounds];
 }
