@@ -2,15 +2,15 @@
 // @ts-ignore
 import { beforeEach, describe, expect, test } from "bun:test";
 import {
-	type ExitCommandContext,
+	type SessionCommandContext,
 	__resetForTests,
-	registerExitCommand,
-	registerExitTarget,
+	registerSessionCommands,
+	registerSessionTarget,
 } from "./session-exit.ts";
 
 type TestCommand = {
 	description?: string;
-	handler: (args: string, ctx: ExitCommandContext) => Promise<void>;
+	handler: (args: string, ctx: SessionCommandContext) => Promise<void>;
 };
 
 type TestPi = {
@@ -37,9 +37,15 @@ function createPi(events: object): TestPi {
 	};
 }
 
-function createContext(): ExitCommandContext {
+function createContext(
+	overrides: Partial<SessionCommandContext> = {},
+): SessionCommandContext {
+	const notifications: Array<{
+		message: string;
+		type?: "info" | "warning" | "error";
+	}> = [];
 	return {
-		cwd: "/tmp/session-exit-test",
+		cwd: "/tmp/session-control-test",
 		hasUI: true,
 		sessionManager: {
 			getEntries() {
@@ -47,8 +53,11 @@ function createContext(): ExitCommandContext {
 			},
 		},
 		ui: {
-			notify() {},
+			notify(message, type) {
+				notifications.push({ message, type });
+			},
 		},
+		...overrides,
 	};
 }
 
@@ -56,76 +65,89 @@ beforeEach(() => {
 	__resetForTests();
 });
 
-describe("session-exit coordinator", () => {
-	test("two extensions in one session share state — only one /exit is registered", async () => {
+describe("session-control coordinator", () => {
+	test("two extensions in one session share state — only one /leave and /detach is registered", async () => {
 		const sessionEvents = {};
 		const mindPi = createPi(sessionEvents);
 		const roomPi = createPi(sessionEvents);
 		const calls: string[] = [];
 
-		registerExitTarget(mindPi as never, {
+		registerSessionTarget(mindPi as never, {
 			id: "mind",
 			label: "mind",
 			priority: 20,
 			isActive: () => true,
-			exit: () => {
-				calls.push("mind");
+			leave: () => {
+				calls.push("mind:leave");
+			},
+			detach: () => {
+				calls.push("mind:detach");
 			},
 		});
-		registerExitCommand(mindPi as never);
+		registerSessionCommands(mindPi as never);
 
-		registerExitTarget(roomPi as never, {
+		registerSessionTarget(roomPi as never, {
 			id: "room",
 			label: "room",
 			priority: 10,
 			isActive: () => true,
-			exit: () => {
-				calls.push("room");
+			leave: () => {
+				calls.push("room:leave");
+			},
+			detach: () => {
+				calls.push("room:detach");
 			},
 		});
-		registerExitCommand(roomPi as never);
+		registerSessionCommands(roomPi as never);
 
-		expect([...mindPi.commands.keys()]).toEqual(["exit"]);
+		expect([...mindPi.commands.keys()]).toEqual(["leave", "detach"]);
 		expect([...roomPi.commands.keys()]).toEqual([]);
 
-		await mindPi.commands.get("exit")?.handler("", createContext());
+		await mindPi.commands.get("leave")?.handler("", createContext());
+		expect(calls).toEqual(["room:leave", "mind:leave"]);
 
-		expect(calls).toEqual(["room", "mind"]);
+		calls.length = 0;
+		await mindPi.commands.get("detach")?.handler("", createContext());
+		expect(calls).toEqual(["room:detach", "mind:detach"]);
 	});
 
-	test("a new session re-registers /exit without inheriting parent-session state", async () => {
+	test("a new session re-registers commands without inheriting parent-session state", async () => {
 		const parentEvents = {};
 		const parentPi = createPi(parentEvents);
 
-		registerExitTarget(parentPi as never, {
+		registerSessionTarget(parentPi as never, {
 			id: "mind",
 			label: "mind",
 			isActive: () => true,
-			exit: () => {},
+			leave: () => {},
+			detach: () => {},
 		});
-		registerExitCommand(parentPi as never);
-		expect([...parentPi.commands.keys()]).toEqual(["exit"]);
+		registerSessionCommands(parentPi as never);
+		expect([...parentPi.commands.keys()]).toEqual(["leave", "detach"]);
 
 		// Simulate ctx.newSession() — fresh EventBus, fresh extension load.
 		const childEvents = {};
 		const childPi = createPi(childEvents);
 		const childCalls: string[] = [];
 
-		registerExitTarget(childPi as never, {
+		registerSessionTarget(childPi as never, {
 			id: "mind",
 			label: "mind",
 			isActive: () => true,
-			exit: () => {
-				childCalls.push("mind");
+			leave: () => {
+				childCalls.push("mind:leave");
+			},
+			detach: () => {
+				childCalls.push("mind:detach");
 			},
 		});
-		registerExitCommand(childPi as never);
+		registerSessionCommands(childPi as never);
 
-		// New session must have its own /exit, not skip because of the parent.
-		expect([...childPi.commands.keys()]).toEqual(["exit"]);
+		// New session must have its own commands, not skip because of the parent.
+		expect([...childPi.commands.keys()]).toEqual(["leave", "detach"]);
 
-		await childPi.commands.get("exit")?.handler("", createContext());
-		expect(childCalls).toEqual(["mind"]);
+		await childPi.commands.get("leave")?.handler("", createContext());
+		expect(childCalls).toEqual(["mind:leave"]);
 	});
 
 	test("targets registered on a sibling pi after the merge still fire", async () => {
@@ -134,48 +156,95 @@ describe("session-exit coordinator", () => {
 		const secondPi = createPi(sessionEvents);
 		const calls: string[] = [];
 
-		registerExitCommand(firstPi as never);
-		registerExitCommand(secondPi as never);
+		registerSessionCommands(firstPi as never);
+		registerSessionCommands(secondPi as never);
 
-		registerExitTarget(secondPi as never, {
+		registerSessionTarget(secondPi as never, {
 			id: "late-room",
 			label: "room",
 			priority: 5,
 			isActive: () => true,
-			exit: () => {
-				calls.push("late-room");
+			leave: () => {
+				calls.push("late-room:leave");
+			},
+			detach: () => {
+				calls.push("late-room:detach");
 			},
 		});
 
-		await firstPi.commands.get("exit")?.handler("", createContext());
+		await firstPi.commands.get("leave")?.handler("", createContext());
+		expect(calls).toEqual(["late-room:leave"]);
 
-		expect(calls).toEqual(["late-room"]);
+		calls.length = 0;
+		await firstPi.commands.get("detach")?.handler("", createContext());
+		expect(calls).toEqual(["late-room:detach"]);
 	});
 
 	test("inactive targets are skipped", async () => {
 		const pi = createPi({});
 		const calls: string[] = [];
 
-		registerExitTarget(pi as never, {
+		registerSessionTarget(pi as never, {
 			id: "idle",
 			label: "idle",
 			isActive: () => false,
-			exit: () => {
-				calls.push("idle");
+			leave: () => {
+				calls.push("idle:leave");
+			},
+			detach: () => {
+				calls.push("idle:detach");
 			},
 		});
-		registerExitTarget(pi as never, {
+		registerSessionTarget(pi as never, {
 			id: "live",
 			label: "live",
 			isActive: () => true,
-			exit: () => {
-				calls.push("live");
+			leave: () => {
+				calls.push("live:leave");
+			},
+			detach: () => {
+				calls.push("live:detach");
 			},
 		});
-		registerExitCommand(pi as never);
+		registerSessionCommands(pi as never);
 
-		await pi.commands.get("exit")?.handler("", createContext());
+		await pi.commands.get("leave")?.handler("", createContext());
+		expect(calls).toEqual(["live:leave"]);
 
-		expect(calls).toEqual(["live"]);
+		calls.length = 0;
+		await pi.commands.get("detach")?.handler("", createContext());
+		expect(calls).toEqual(["live:detach"]);
+	});
+
+	test("commands report when there is nothing active", async () => {
+		const pi = createPi({});
+		const notifications: Array<{ message: string; type?: string }> = [];
+		const ctx: SessionCommandContext = {
+			cwd: "/tmp/session-test",
+			hasUI: true,
+			sessionManager: { getEntries: () => [] },
+			ui: {
+				notify(message, type) {
+					notifications.push({ message, type });
+				},
+			},
+		};
+
+		registerSessionCommands(pi as never);
+		await pi.commands.get("leave")?.handler("", ctx);
+		expect(notifications.pop()).toEqual(
+			expect.objectContaining({
+				message: expect.stringContaining("No active mind or room to leave"),
+				type: "info",
+			}),
+		);
+
+		await pi.commands.get("detach")?.handler("", ctx);
+		expect(notifications.pop()).toEqual(
+			expect.objectContaining({
+				message: expect.stringContaining("No active mind or room to detach"),
+				type: "info",
+			}),
+		);
 	});
 });

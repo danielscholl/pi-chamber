@@ -3,9 +3,7 @@ import type { ParticipantStatus } from "./ui.ts";
 
 export type RoomSessionManager = {
 	getEntries(): Array<Record<string, unknown>>;
-	getSessionFile?(): string | undefined;
-	appendCustomEntry?(customType: string, data?: unknown): string;
-	appendSessionInfo?(name: string): string;
+	getLeafId?(): string | null;
 };
 
 export type RoomCommandContext = {
@@ -15,14 +13,10 @@ export type RoomCommandContext = {
 	signal?: AbortSignal;
 	abort?: () => void;
 	waitForIdle?(): Promise<void>;
-	newSession?(options?: {
-		parentSession?: string;
-		setup?: (sessionManager: RoomSessionManager) => Promise<void> | void;
-		withSession?: (ctx: RoomCommandContext) => Promise<void> | void;
-	}): Promise<{ cancelled?: boolean }>;
-	switchSession?(
-		sessionPath: string,
+	fork?(
+		entryId: string,
 		options?: {
+			position?: "before" | "at";
 			withSession?: (ctx: RoomCommandContext) => Promise<void> | void;
 		},
 	): Promise<{ cancelled?: boolean }>;

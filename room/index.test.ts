@@ -41,14 +41,9 @@ type SentMessage = {
 	details?: unknown;
 };
 
-type TestNewSession = {
-	parentSession?: string;
-	customEntries: Array<{ customType: string; data?: unknown }>;
-	sessionNames: string[];
-};
-
-type TestSwitchSession = {
-	sessionPath: string;
+type TestForkCall = {
+	entryId: string;
+	position?: "before" | "at";
 };
 
 type TestContext = {
@@ -61,26 +56,20 @@ type TestContext = {
 	entries: Array<Record<string, unknown>>;
 	selectValues: Array<string | undefined>;
 	inputValues: Array<string | undefined>;
-	sessionFile?: string;
-	newSessions: TestNewSession[];
-	switches: TestSwitchSession[];
+	leafId: string | null;
+	forkCalls: TestForkCall[];
+	forkResult: { cancelled?: boolean };
+	forkThrows?: Error;
 	waitForIdleCount: number;
 	sessionManager: {
 		getEntries(): Array<Record<string, unknown>>;
-		getSessionFile?(): string | undefined;
+		getLeafId?(): string | null;
 	};
 	waitForIdle?(): Promise<void>;
-	newSession?(options?: {
-		parentSession?: string;
-		setup?: (sessionManager: {
-			appendCustomEntry?(customType: string, data?: unknown): string;
-			appendSessionInfo?(name: string): string;
-		}) => Promise<void> | void;
-		withSession?: (ctx: TestContext) => Promise<void> | void;
-	}): Promise<{ cancelled?: boolean }>;
-	switchSession?(
-		sessionPath: string,
+	fork?(
+		entryId: string,
 		options?: {
+			position?: "before" | "at";
 			withSession?: (ctx: TestContext) => Promise<void> | void;
 		},
 	): Promise<{ cancelled?: boolean }>;
@@ -119,7 +108,9 @@ function writeCompleteMind(cwd: string, slug: string) {
 	return paths;
 }
 
-function createHarness() {
+function createHarness(
+	entries: Array<Record<string, unknown>> = [],
+) {
 	const commands = new Map<
 		string,
 		{
@@ -163,6 +154,10 @@ function createHarness() {
 		},
 		appendEntry(stream: string, entry: Record<string, unknown>) {
 			appendEntries.push({ stream, entry });
+			// Mirror real Pi: persisted custom entries become readable via
+			// sessionManager.getEntries() in subsequent reads. Tests that share
+			// the entries array between harness and context see this state.
+			entries.push({ type: "custom", customType: stream, data: entry });
 		},
 		registerMessageRenderer(customType: string, renderer: unknown) {
 			messageRenderers.set(customType, renderer);
@@ -173,7 +168,14 @@ function createHarness() {
 	};
 
 	chamberRoomExtension(pi as never);
-	return { commands, handlers, appendEntries, messageRenderers, sentMessages };
+	return {
+		commands,
+		handlers,
+		appendEntries,
+		messageRenderers,
+		sentMessages,
+		entries,
+	};
 }
 
 function createContext(
@@ -183,8 +185,10 @@ function createContext(
 		hasUI: boolean;
 		selectValues: Array<string | undefined>;
 		inputValues: Array<string | undefined>;
-		sessionFile: string;
-		enableSessionControl: boolean;
+		leafId: string | null;
+		enableFork: boolean;
+		forkResult: { cancelled?: boolean };
+		forkThrows: Error;
 	}> = {},
 ): TestContext {
 	const notifications: TestNotification[] = [];
@@ -193,8 +197,7 @@ function createContext(
 	const workingIndicators: Array<
 		{ frames?: string[]; intervalMs?: number } | undefined
 	> = [];
-	const newSessions: TestNewSession[] = [];
-	const switches: TestSwitchSession[] = [];
+	const forkCalls: TestForkCall[] = [];
 	const ctx: TestContext = {
 		cwd,
 		hasUI: overrides.hasUI ?? true,
@@ -205,17 +208,18 @@ function createContext(
 		entries,
 		selectValues: overrides.selectValues ?? [],
 		inputValues: overrides.inputValues ?? [],
-		sessionFile: overrides.sessionFile,
-		newSessions,
-		switches,
+		leafId: overrides.leafId ?? null,
+		forkCalls,
+		forkResult: overrides.forkResult ?? { cancelled: false },
+		forkThrows: overrides.forkThrows,
 		waitForIdleCount: 0,
 		sessionManager: {
 			getEntries() {
 				return entries;
 			},
-			getSessionFile: overrides.sessionFile
-				? () => overrides.sessionFile
-				: undefined,
+			getLeafId() {
+				return ctx.leafId;
+			},
 		},
 		ui: {
 			notify(message, type) {
@@ -241,34 +245,15 @@ function createContext(
 		},
 	};
 
-	if (overrides.enableSessionControl) {
+	if (overrides.enableFork) {
 		ctx.waitForIdle = async () => {
 			ctx.waitForIdleCount += 1;
 		};
-		ctx.newSession = async (options) => {
-			const record: TestNewSession = {
-				parentSession: options?.parentSession,
-				customEntries: [],
-				sessionNames: [],
-			};
-			newSessions.push(record);
-			await options?.setup?.({
-				appendCustomEntry(customType, data) {
-					record.customEntries.push({ customType, data });
-					return `custom-${record.customEntries.length}`;
-				},
-				appendSessionInfo(name) {
-					record.sessionNames.push(name);
-					return `session-info-${record.sessionNames.length}`;
-				},
-			});
+		ctx.fork = async (entryId, options) => {
+			forkCalls.push({ entryId, position: options?.position });
+			if (ctx.forkThrows) throw ctx.forkThrows;
 			await options?.withSession?.(ctx);
-			return { cancelled: false };
-		};
-		ctx.switchSession = async (sessionPath, options) => {
-			switches.push({ sessionPath });
-			await options?.withSession?.(ctx);
-			return { cancelled: false };
+			return ctx.forkResult;
 		};
 	}
 
@@ -303,12 +288,13 @@ describe("room extension", () => {
 		resetSessionExit();
 	});
 
-	test("registers room, exit, and director-shortcut commands", () => {
+	test("registers room, leave, detach, and director-shortcut commands", () => {
 		const harness = createHarness();
 		expect([...harness.commands.keys()].sort()).toEqual([
-			"exit",
+			"detach",
 			"halt",
 			"inject",
+			"leave",
 			"next",
 			"room",
 		]);
@@ -592,7 +578,7 @@ describe("room extension", () => {
 		});
 	});
 
-	test("/room off is rejected in favor of /exit", async () => {
+	test("/room off is rejected in favor of /leave or /detach", async () => {
 		await withTempProject(async (cwd) => {
 			writeCompleteMind(cwd, "ariadne");
 			const harness = createHarness();
@@ -610,27 +596,28 @@ describe("room extension", () => {
 			expect(ctx.notifications[ctx.notifications.length - 1]).toEqual(
 				expect.objectContaining({
 					type: "error",
-					message: expect.stringContaining("Use /exit"),
+					message: expect.stringMatching(/Use \/(leave|exit)/),
 				}),
 			);
 		});
 	});
 
-	test("/exit leaves an active room and clears the widget", async () => {
+	test("/leave leaves an active room and clears the widget", async () => {
 		await withTempProject(async (cwd) => {
 			writeCompleteMind(cwd, "ariadne");
-			const harness = createHarness();
-			const ctx = createContext(cwd);
+			const sharedEntries: Array<Record<string, unknown>> = [];
+			const harness = createHarness(sharedEntries);
+			const ctx = createContext(cwd, sharedEntries);
 			await harness.commands.get("room")?.handler("on concurrent all", ctx);
 
-			await harness.commands.get("exit")?.handler("", ctx);
+			await harness.commands.get("leave")?.handler("", ctx);
 
 			expect(harness.appendEntries[harness.appendEntries.length - 1]).toEqual({
 				stream: "room-state",
 				entry: expect.objectContaining({
 					active: false,
 					mode: "concurrent",
-					reason: "exit command",
+					reason: "leave command",
 				}),
 			});
 			expect(ctx.statuses[ctx.statuses.length - 1]).toEqual({
@@ -643,87 +630,130 @@ describe("room extension", () => {
 			expect(ctx.notifications[ctx.notifications.length - 1].message).toContain(
 				"Room off",
 			);
+			expect(
+				ctx.notifications[ctx.notifications.length - 1].message,
+			).toContain("Conversation continues in this session");
 		});
 	});
 
-	test("/room on opens a dedicated chamber session when session control is available", async () => {
+	test("/room on activates in-place even when fork is available — no session swap", async () => {
 		await withTempProject(async (cwd) => {
 			writeCompleteMind(cwd, "ariadne");
 			writeCompleteMind(cwd, "mycroft");
-			const harness = createHarness();
-			const ctx = createContext(cwd, [], {
-				sessionFile: "/sessions/normal.jsonl",
-				enableSessionControl: true,
+			const sharedEntries: Array<Record<string, unknown>> = [];
+			const harness = createHarness(sharedEntries);
+			const ctx = createContext(cwd, sharedEntries, {
+				leafId: "entry-pre-room",
+				enableFork: true,
 			});
 
 			await harness.commands.get("room")?.handler("on concurrent all", ctx);
 
-			expect(harness.appendEntries).toHaveLength(0);
-			expect(ctx.waitForIdleCount).toBe(1);
-			expect(ctx.newSessions).toHaveLength(1);
-			expect(ctx.newSessions[0].parentSession).toBe("/sessions/normal.jsonl");
-			expect(ctx.newSessions[0].sessionNames[0]).toContain("Room:");
-			expect(ctx.newSessions[0].customEntries).toEqual([
-				expect.objectContaining({
-					customType: "room-state",
-					data: expect.objectContaining({
-						active: true,
-						mode: "concurrent",
-						participants: ["ariadne", "mycroft"],
-						returnSessionFile: "/sessions/normal.jsonl",
-					}),
-				}),
-			]);
-			const activationNotice = ctx.notifications.find((n) =>
-				n.message.includes("Dedicated room session"),
-			);
-			expect(activationNotice?.message).toContain(
-				"return to the previous session",
-			);
-		});
-	});
-
-	test("/exit returns from a dedicated chamber session to the previous session", async () => {
-		await withTempProject(async (cwd) => {
-			writeCompleteMind(cwd, "ariadne");
-			writeCompleteMind(cwd, "mycroft");
-			const entries = [
-				roomStateEntry({
+			expect(ctx.forkCalls).toHaveLength(0);
+			expect(ctx.waitForIdleCount).toBe(0);
+			expect(harness.appendEntries[0]).toEqual({
+				stream: "room-state",
+				entry: expect.objectContaining({
 					active: true,
 					mode: "concurrent",
 					participants: ["ariadne", "mycroft"],
-					returnSessionFile: "/sessions/normal.jsonl",
+					preRoomLeafId: "entry-pre-room",
 				}),
-			];
-			const harness = createHarness();
-			const ctx = createContext(cwd, entries, {
-				sessionFile: "/sessions/room.jsonl",
-				enableSessionControl: true,
+			});
+		});
+	});
+
+	test("/detach forks at the captured pre-room leaf id and switches into the fork", async () => {
+		await withTempProject(async (cwd) => {
+			writeCompleteMind(cwd, "ariadne");
+			const sharedEntries: Array<Record<string, unknown>> = [];
+			const harness = createHarness(sharedEntries);
+			const ctx = createContext(cwd, sharedEntries, {
+				leafId: "entry-pre-room",
+				enableFork: true,
 			});
 
-			await runHandler(harness, "session_start", { reason: "startup" }, ctx);
-			await harness.commands.get("exit")?.handler("", ctx);
+			await harness.commands.get("room")?.handler("on concurrent all", ctx);
+			await harness.commands.get("detach")?.handler("", ctx);
 
-			expect(harness.appendEntries[harness.appendEntries.length - 1]).toEqual({
+			expect(harness.appendEntries[0]).toEqual(
+				expect.objectContaining({
+					stream: "room-state",
+					entry: expect.objectContaining({
+						active: true,
+						preRoomLeafId: "entry-pre-room",
+					}),
+				}),
+			);
+			const lastEntry =
+				harness.appendEntries[harness.appendEntries.length - 1];
+			expect(lastEntry).toEqual({
 				stream: "room-state",
 				entry: expect.objectContaining({
 					active: false,
-					mode: "concurrent",
-					returnSessionFile: "/sessions/normal.jsonl",
-					reason: "exit command",
+					reason: "detach",
 				}),
 			});
-			expect(ctx.waitForIdleCount).toBe(1);
-			expect(ctx.switches).toEqual([
-				{ sessionPath: "/sessions/normal.jsonl" },
+			expect(ctx.forkCalls).toEqual([
+				{ entryId: "entry-pre-room", position: "at" },
 			]);
+			expect(ctx.waitForIdleCount).toBe(1);
 			expect(ctx.statuses[ctx.statuses.length - 1]).toEqual({
 				key: "room",
 				value: undefined,
 			});
 			expect(
 				ctx.notifications[ctx.notifications.length - 1].message,
-			).toContain("Returned to the previous session");
+			).toContain("Detached from room");
+		});
+	});
+
+	test("/detach falls back to /leave when no pre-room leaf id was captured", async () => {
+		await withTempProject(async (cwd) => {
+			writeCompleteMind(cwd, "ariadne");
+			const sharedEntries: Array<Record<string, unknown>> = [];
+			const harness = createHarness(sharedEntries);
+			const ctx = createContext(cwd, sharedEntries, { enableFork: true });
+
+			await harness.commands.get("room")?.handler("on concurrent all", ctx);
+			await harness.commands.get("detach")?.handler("", ctx);
+
+			expect(ctx.forkCalls).toHaveLength(0);
+			expect(
+				ctx.notifications.find((n) =>
+					n.message.includes("no pre-room fork point"),
+				),
+			).toEqual(
+				expect.objectContaining({
+					type: "warning",
+				}),
+			);
+			const lastEntry =
+				harness.appendEntries[harness.appendEntries.length - 1];
+			expect(lastEntry).toEqual({
+				stream: "room-state",
+				entry: expect.objectContaining({
+					active: false,
+					reason: "detach fallback",
+				}),
+			});
+		});
+	});
+
+	test("/detach with no active room reports nothing to detach", async () => {
+		await withTempProject(async (cwd) => {
+			const harness = createHarness();
+			const ctx = createContext(cwd, [], { enableFork: true });
+
+			await harness.commands.get("detach")?.handler("", ctx);
+
+			expect(ctx.forkCalls).toHaveLength(0);
+			expect(ctx.notifications).toEqual([
+				expect.objectContaining({
+					type: "info",
+					message: expect.stringContaining("No active mind or room to detach"),
+				}),
+			]);
 		});
 	});
 
@@ -1318,7 +1348,7 @@ describe("room extension", () => {
 		});
 	});
 
-	test("/exit clears the observatory lens directory", async () => {
+	test("/leave clears the observatory lens directory", async () => {
 		await withTempProject(async (cwd) => {
 			writeCompleteMind(cwd, "ariadne");
 			const harness = createHarness();
@@ -1327,7 +1357,7 @@ describe("room extension", () => {
 			const lensDir = path.join(cwd, ".pi/observatory/lenses/room");
 			expect(fs.existsSync(lensDir)).toBe(true);
 
-			await harness.commands.get("exit")?.handler("", ctx);
+			await harness.commands.get("leave")?.handler("", ctx);
 
 			expect(fs.existsSync(lensDir)).toBe(false);
 		});
@@ -1364,6 +1394,7 @@ describe("room extension", () => {
 			const ctx = createContext(cwd, [], {
 				selectValues: ["▸ design-review · sequential · ariadne, mycroft"],
 				inputValues: [],
+				leafId: "entry-pre-picker",
 			});
 
 			await harness.commands.get("room")?.handler("", ctx);
@@ -1375,9 +1406,14 @@ describe("room extension", () => {
 					mode: "sequential",
 					slug: "design-review",
 					participants: ["ariadne", "mycroft"],
+					// Picker-driven activation must capture preRoomLeafId so that
+					// /detach has a fork anchor. Without this, /detach silently
+					// degrades to /leave for saved rooms.
+					preRoomLeafId: "entry-pre-picker",
 				}),
 			});
 			expect(ctx.notifications[0].message).toContain("Loaded 1 prior turn");
+			expect(ctx.notifications[0].message).toContain("/detach");
 		});
 	});
 });

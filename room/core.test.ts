@@ -92,10 +92,10 @@ describe("parseRoomArgs", () => {
 		expect(parseRoomArgs("clear")).toEqual({ type: "clear" });
 	});
 
-	test("rejects legacy off command in favor of /exit", () => {
+	test("rejects legacy off command in favor of /leave or /detach", () => {
 		expect(parseRoomArgs("off")).toEqual({
 			type: "error",
-			message: expect.stringContaining("Use /exit"),
+			message: expect.stringMatching(/Use \/(leave|exit)/),
 		});
 	});
 

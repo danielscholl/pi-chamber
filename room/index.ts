@@ -22,7 +22,10 @@ import {
 	writeSavedRoom,
 } from "./core.ts";
 import { listGenesisMinds } from "../mind/core.ts";
-import { registerExitCommand, registerExitTarget } from "../shared/session-exit.ts";
+import {
+	registerSessionCommands,
+	registerSessionTarget,
+} from "../shared/session-exit.ts";
 import { CHAIRMAN_SLUG } from "./prompts.ts";
 import {
 	ROOM_CUSTOM_TYPES,
@@ -428,7 +431,7 @@ export default function (pi: ExtensionAPI) {
 		},
 	};
 
-	registerExitTarget(pi, {
+	registerSessionTarget(pi, {
 		id: "room",
 		label: "room",
 		priority: 10,
@@ -436,14 +439,17 @@ export default function (pi: ExtensionAPI) {
 			const state = latestRoomState(ctx.sessionManager.getEntries());
 			return Boolean(activeRoom?.active || state?.active);
 		},
-		exit: async (ctx) => {
-			await deactivateRoom(
+		leave: async (ctx) => {
+			await leaveRoom(
 				ctx as unknown as RoomCommandContext,
-				"exit command",
+				"leave command",
 			);
 		},
+		detach: async (ctx) => {
+			await detachRoom(ctx as unknown as RoomCommandContext);
+		},
 	});
-	registerExitCommand(pi);
+	registerSessionCommands(pi);
 
 	pi.registerCommand("room", roomCommand);
 
@@ -766,7 +772,16 @@ export default function (pi: ExtensionAPI) {
 			);
 			return;
 		}
-		activeRoom = { ...validation.state, slug: saved.slug, name: saved.name };
+		// Capture the session leaf id BEFORE persisting the activation marker
+		// so /detach has a fork anchor. Without this, the picker-driven
+		// activation path silently degrades /detach to /leave.
+		const preRoomLeafId = safeGetLeafId(ctx);
+		activeRoom = {
+			...validation.state,
+			slug: saved.slug,
+			name: saved.name,
+			...(preRoomLeafId ? { preRoomLeafId } : {}),
+		};
 		lastInactiveRoom = undefined;
 		participantTrackers = buildParticipantTrackers(ctx.cwd, activeRoom);
 		orchestrator.loadTranscriptForActive(ctx.cwd);
@@ -778,7 +793,7 @@ export default function (pi: ExtensionAPI) {
 		syncObservatoryLens(ctx.cwd);
 		notify(
 			ctx,
-			`${describeActiveRoom(activeRoom, ctx.cwd)} Loaded ${orchestrator.getDiskTranscriptCount()} prior turn${orchestrator.getDiskTranscriptCount() === 1 ? "" : "s"}. Use /exit to stop routing.`,
+			`${describeActiveRoom(activeRoom, ctx.cwd)} Loaded ${orchestrator.getDiskTranscriptCount()} prior turn${orchestrator.getDiskTranscriptCount() === 1 ? "" : "s"}. Use /leave to stop routing, or /detach to rewind and preserve this room as an artifact.`,
 			"info",
 		);
 	}
@@ -802,7 +817,7 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 		if (activeRoom?.slug === slug) {
-			await deactivateRoom(ctx);
+			await leaveRoom(ctx, "saved room deleted");
 		}
 		notify(ctx, `Deleted saved room "${slug}".`, "info");
 	}
@@ -897,35 +912,14 @@ export default function (pi: ExtensionAPI) {
 			? ` Saved as "${savedSlug}".`
 			: " Unsaved one-off room.";
 
-		const returnSessionFile = ctx.sessionManager.getSessionFile?.();
-		if (returnSessionFile && ctx.newSession && ctx.switchSession) {
-			const stateForNewSession: RoomState = {
-				...validated,
-				returnSessionFile,
-			};
-			await ctx.waitForIdle?.();
-			const result = await ctx.newSession({
-				parentSession: returnSessionFile,
-				setup: (sessionManager) => {
-					sessionManager.appendCustomEntry?.(STATE_STREAM, stateForNewSession);
-					const label = describeActiveRoom(stateForNewSession, ctx.cwd);
-					sessionManager.appendSessionInfo?.(`Room: ${label}`);
-				},
-				withSession: (replacementCtx) => {
-					notify(
-						replacementCtx,
-						`${describeActiveRoom(stateForNewSession, replacementCtx.cwd)}${savedNote} Dedicated room session. Use /exit to return to the previous session.`,
-						"info",
-					);
-				},
-			});
-			if (result.cancelled) {
-				notify(ctx, "Room activation cancelled.", "info");
-			}
-			return;
-		}
+		// Capture the session leaf id BEFORE persisting the activation marker.
+		// /detach uses this id to fork the session back to its pre-room state.
+		const preRoomLeafId = safeGetLeafId(ctx);
+		const stateWithLeaf: RoomState = preRoomLeafId
+			? { ...validated, preRoomLeafId }
+			: validated;
 
-		activeRoom = validated;
+		activeRoom = stateWithLeaf;
 		lastInactiveRoom = undefined;
 		participantTrackers = buildParticipantTrackers(ctx.cwd, activeRoom);
 		orchestrator.loadTranscriptForActive(ctx.cwd);
@@ -937,22 +931,16 @@ export default function (pi: ExtensionAPI) {
 		syncObservatoryLens(ctx.cwd);
 		notify(
 			ctx,
-			`${describeActiveRoom(activeRoom, ctx.cwd)}${savedNote} Use /exit to stop routing.`,
+			`${describeActiveRoom(activeRoom, ctx.cwd)}${savedNote} Use /leave to stop routing, or /detach to rewind and preserve this room as an artifact.`,
 			"info",
 		);
 	}
 
-	async function deactivateRoom(
-		ctx: RoomCommandContext,
-		reason?: string,
-	): Promise<void> {
-		orchestrator.haltActive();
-		stopStatusTicker();
-		setWorkingIndicator(ctx, false);
-		const previous =
-			activeRoom ?? latestRoomState(ctx.sessionManager.getEntries());
-		const returnSessionFile = previous?.returnSessionFile;
-		const inactive: RoomState = previous
+	function buildInactiveRoomState(
+		previous: RoomState | undefined,
+		reason: string | undefined,
+	): RoomState {
+		return previous
 			? {
 					...previous,
 					active: false,
@@ -966,6 +954,15 @@ export default function (pi: ExtensionAPI) {
 					deactivatedAt: new Date().toISOString(),
 					...(reason ? { reason } : {}),
 				};
+	}
+
+	function tearDownActiveRoom(
+		ctx: RoomCommandContext,
+		inactive: RoomState,
+	): void {
+		orchestrator.haltActive();
+		stopStatusTicker();
+		setWorkingIndicator(ctx, false);
 		activeRoom = undefined;
 		participantTrackers = [];
 		orchestrator.resetTranscriptState();
@@ -985,31 +982,78 @@ export default function (pi: ExtensionAPI) {
 		} catch {
 			/* best-effort */
 		}
+	}
 
-		if (returnSessionFile && ctx.switchSession) {
-			await ctx.waitForIdle?.();
-			const result = await ctx.switchSession(returnSessionFile, {
+	async function leaveRoom(
+		ctx: RoomCommandContext,
+		reason?: string,
+	): Promise<void> {
+		const previous =
+			activeRoom ?? latestRoomState(ctx.sessionManager.getEntries());
+		const inactive = buildInactiveRoomState(previous, reason);
+		tearDownActiveRoom(ctx, inactive);
+		notify(
+			ctx,
+			"Room off. Conversation continues in this session.",
+			"info",
+		);
+	}
+
+	async function detachRoom(ctx: RoomCommandContext): Promise<void> {
+		const previous =
+			activeRoom ?? latestRoomState(ctx.sessionManager.getEntries());
+		const preRoomLeafId = previous?.preRoomLeafId;
+
+		if (!preRoomLeafId || !ctx.fork) {
+			const label = previous?.slug ?? previous?.name ?? "the active room";
+			notify(
+				ctx,
+				`Cannot detach ${label}: no pre-room fork point captured for this activation. Falling back to /leave; this round stays in the current session.`,
+				"warning",
+			);
+			await leaveRoom(ctx, "detach fallback");
+			return;
+		}
+
+		// Tear down room state in the current (artifact) session and persist a
+		// "detach" deactivation entry so the artifact is internally consistent.
+		const inactive = buildInactiveRoomState(previous, "detach");
+		tearDownActiveRoom(ctx, inactive);
+
+		await ctx.waitForIdle?.();
+
+		try {
+			const result = await ctx.fork(preRoomLeafId, {
+				position: "at",
 				withSession: (replacementCtx) => {
 					setRoomStatus(replacementCtx, undefined);
 					syncParticipantWidget(replacementCtx);
 					notify(
 						replacementCtx,
-						"Room off. Returned to the previous session.",
+						`Detached from room. Session rewound to before activation; the room round is preserved as an artifact.`,
 						"info",
 					);
 				},
 			});
 			if (result.cancelled) {
-				notify(
-					ctx,
-					"Room off, but returning to the previous session was cancelled.",
-					"warning",
-				);
+				notify(ctx, "Detach cancelled.", "info");
 			}
-			return;
+		} catch (error) {
+			notify(
+				ctx,
+				`Detach failed: ${errorMessage(error)}. Room round remains in this session.`,
+				"warning",
+			);
 		}
+	}
 
-		notify(ctx, "Room off. Future prompts use the normal assistant.", "info");
+	function safeGetLeafId(ctx: RoomCommandContext): string | undefined {
+		try {
+			const id = ctx.sessionManager.getLeafId?.();
+			return id ?? undefined;
+		} catch {
+			return undefined;
+		}
 	}
 
 	function showRoomStatus(ctx: RoomCommandContext): void {
@@ -1186,7 +1230,8 @@ function usageText(cwd: string): string {
 	return [
 		"Usage:",
 		"  /room              picker — pick a saved room or create a new one",
-		"  /exit                 leave the active mind or room",
+		"  /leave             leave the active mind or room (conversation stays in this session)",
+		"  /detach            detach the active mind or room (rewind to before activation; round preserved as an artifact)",
 		"  /room status       show the active room",
 		"  /room list         list saved rooms",
 		"  /room reset [<slug>] drop per-mind sessions (forkPerMind rooms only)",

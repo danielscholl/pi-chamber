@@ -43,7 +43,12 @@ export type RoomState = {
 	clearedAt?: string;
 	clearCount?: number;
 	reason?: string;
-	returnSessionFile?: string;
+	/**
+	 * Entry id of the session leaf at the moment of room activation. Captured
+	 * so /detach can fork the session back to that point, leaving the room
+	 * round behind in the original session as an artifact.
+	 */
+	preRoomLeafId?: string;
 };
 
 export type GroupChatOverrides = {
@@ -199,7 +204,7 @@ export function parseRoomArgs(args: string): RoomCommand {
 			return {
 				type: "error",
 				message:
-					"Usage: /room [on|status|list|mode|minds|reset|clear]. Use /exit to leave an active room. Supported v1 modes: concurrent, sequential, group-chat.",
+					"Usage: /room [on|status|list|mode|minds|reset|clear]. Use /leave to leave an active room, or /detach to rewind and preserve it as an artifact. Supported v1 modes: concurrent, sequential, group-chat.",
 			};
 	}
 }

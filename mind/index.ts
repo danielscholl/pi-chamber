@@ -5,13 +5,14 @@ import {
 	loadMindContext,
 	normalizeMindSlug,
 } from "./core.ts";
-import { registerExitCommand, registerExitTarget } from "../shared/session-exit.ts";
+import {
+	registerSessionCommands,
+	registerSessionTarget,
+} from "../shared/session-exit.ts";
 
 type MindModeSessionManager = {
 	getEntries(): Array<Record<string, unknown>>;
-	getSessionFile?(): string | undefined;
-	appendCustomEntry?(customType: string, data?: unknown): string;
-	appendSessionInfo?(name: string): string;
+	getLeafId?(): string | null;
 };
 
 type MindModeCommandContext = {
@@ -19,14 +20,10 @@ type MindModeCommandContext = {
 	hasUI: boolean;
 	sessionManager: MindModeSessionManager;
 	waitForIdle?(): Promise<void>;
-	newSession?(options?: {
-		parentSession?: string;
-		setup?: (sessionManager: MindModeSessionManager) => Promise<void> | void;
-		withSession?: (ctx: MindModeCommandContext) => Promise<void> | void;
-	}): Promise<{ cancelled?: boolean }>;
-	switchSession?(
-		sessionPath: string,
+	fork?(
+		entryId: string,
 		options?: {
+			position?: "before" | "at";
 			withSession?: (ctx: MindModeCommandContext) => Promise<void> | void;
 		},
 	): Promise<{ cancelled?: boolean }>;
@@ -46,7 +43,12 @@ type MindModeStateEntry = {
 	activatedAt?: string;
 	deactivatedAt?: string;
 	reason?: string;
-	returnSessionFile?: string;
+	/**
+	 * Entry id of the session leaf at the moment of activation. Captured so
+	 * /detach can fork the session back to that point, leaving the inhabited
+	 * mind chat behind in the original session as an artifact.
+	 */
+	preMindLeafId?: string;
 };
 
 type AutocompleteItem = {
@@ -95,36 +97,9 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		const returnSessionFile = ctx.sessionManager.getSessionFile?.();
-		if (returnSessionFile && ctx.newSession && ctx.switchSession) {
-			await ctx.waitForIdle?.();
-			const state: MindModeStateEntry = {
-				active: true,
-				slug: loaded.slug,
-				mindPath: loaded.paths.mindPath,
-				activatedAt: new Date().toISOString(),
-				returnSessionFile,
-			};
-			const result = await ctx.newSession({
-				parentSession: returnSessionFile,
-				setup: (sessionManager) => {
-					sessionManager.appendCustomEntry?.(STATE_STREAM, state);
-					sessionManager.appendSessionInfo?.(`Mind: ${loaded.slug}`);
-				},
-				withSession: (replacementCtx) => {
-					setMindStatus(replacementCtx, loaded.slug);
-					notify(
-						replacementCtx,
-						`Mind mode active in a dedicated session: ${loaded.slug}. Future turns will inhabit ${loaded.paths.mindPath}. Use /exit to return to the previous session.`,
-						"info",
-					);
-				},
-			});
-			if (result.cancelled) {
-				notify(ctx, "Mind mode activation cancelled.", "info");
-			}
-			return;
-		}
+		// Capture the current leaf id BEFORE persisting the activation marker.
+		// /detach uses this id to fork the session back to its pre-mind state.
+		const preMindLeafId = safeGetLeafId(ctx);
 
 		activeMindSlug = loaded.slug;
 		inactiveMindSlug = undefined;
@@ -133,22 +108,22 @@ export default function (pi: ExtensionAPI) {
 			slug: loaded.slug,
 			mindPath: loaded.paths.mindPath,
 			activatedAt: new Date().toISOString(),
+			...(preMindLeafId ? { preMindLeafId } : {}),
 		});
 		setMindStatus(ctx, loaded.slug);
 		notify(
 			ctx,
-			`Mind mode active: ${loaded.slug}. Future turns will inhabit ${loaded.paths.mindPath}. Use /exit to return to the normal assistant.`,
+			`Mind mode active: ${loaded.slug}. Future turns will inhabit ${loaded.paths.mindPath}. Use /leave to return to the normal assistant in this session, or /detach to rewind and preserve this chat as an artifact.`,
 			"info",
 		);
 	}
 
-	async function deactivateMind(
+	async function leaveMind(
 		ctx: MindModeCommandContext,
 		reason?: string,
 	): Promise<void> {
 		const state = latestMindModeState(ctx.sessionManager.getEntries());
 		const previous = activeMindSlug ?? state?.slug;
-		const returnSessionFile = state?.returnSessionFile;
 		activeMindSlug = undefined;
 		inactiveMindSlug = previous ?? inactiveMindSlug;
 		persistState({
@@ -156,49 +131,83 @@ export default function (pi: ExtensionAPI) {
 			...(previous ? { slug: previous } : {}),
 			deactivatedAt: new Date().toISOString(),
 			...(reason ? { reason } : {}),
-			...(returnSessionFile ? { returnSessionFile } : {}),
 		});
 		setMindStatus(ctx, undefined);
+		notify(
+			ctx,
+			previous
+				? `Mind mode off. Left ${previous}; conversation continues in this session.`
+				: "Mind mode off. Conversation continues in this session.",
+			"info",
+		);
+	}
 
-		if (returnSessionFile && ctx.switchSession) {
-			await ctx.waitForIdle?.();
-			const result = await ctx.switchSession(returnSessionFile, {
+	async function detachMind(ctx: MindModeCommandContext): Promise<void> {
+		const state = latestMindModeState(ctx.sessionManager.getEntries());
+		const previous = activeMindSlug ?? state?.slug;
+		const preMindLeafId = state?.preMindLeafId;
+
+		if (!previous) {
+			// isActive said yes but state is malformed. Treat as a leave to be safe.
+			await leaveMind(ctx, "detach without slug");
+			return;
+		}
+
+		if (!preMindLeafId || !ctx.fork) {
+			notify(
+				ctx,
+				`Cannot detach ${previous}: no pre-mind fork point captured for this activation. Falling back to /leave; this chat stays in the current session.`,
+				"warning",
+			);
+			await leaveMind(ctx, "detach fallback");
+			return;
+		}
+
+		// Mark the OLD session as deactivated before forking so the artifact
+		// is internally consistent: anyone returning to it later sees a clean
+		// "detach" closing entry rather than a dangling active state.
+		persistState({
+			active: false,
+			slug: previous,
+			deactivatedAt: new Date().toISOString(),
+			reason: "detach",
+		});
+
+		// Clear closure state. The forked session starts fresh; the "Mind Mode
+		// Off" guard from leaveMind would only fire if a guard slug were set,
+		// which we deliberately skip here because the new session never had
+		// the mind in its own transcript.
+		activeMindSlug = undefined;
+		inactiveMindSlug = undefined;
+		setMindStatus(ctx, undefined);
+
+		await ctx.waitForIdle?.();
+
+		try {
+			const result = await ctx.fork(preMindLeafId, {
+				position: "at",
 				withSession: (replacementCtx) => {
-					// The parent session never had this mind active in its own
-					// transcript, so don't carry the "Mind Mode Off" guard into
-					// it. Clear closure state so the next before_agent_start in
-					// the parent runs without injection. session_start firing on
-					// the parent will re-derive any state from its own entries.
-					activeMindSlug = undefined;
-					inactiveMindSlug = undefined;
 					setMindStatus(replacementCtx, undefined);
 					notify(
 						replacementCtx,
-						previous
-							? `Mind mode off. Returned from ${previous} to the previous session.`
-							: "Mind mode off. Returned to the previous session.",
+						`Detached from ${previous}. Session rewound to before activation; the ${previous} chat is preserved as an artifact.`,
 						"info",
 					);
 				},
 			});
 			if (result.cancelled) {
-				notify(
-					ctx,
-					"Mind mode off, but returning to the previous session was cancelled.",
-					"warning",
-				);
+				notify(ctx, "Detach cancelled.", "info");
 			}
-			return;
+		} catch (error) {
+			notify(
+				ctx,
+				`Detach failed: ${errorMessage(error)}. Mind chat remains in this session.`,
+				"warning",
+			);
 		}
-
-		notify(
-			ctx,
-			"Mind mode off. Future turns use the normal assistant.",
-			"info",
-		);
 	}
 
-	registerExitTarget(pi, {
+	registerSessionTarget(pi, {
 		id: "mind",
 		label: "mind",
 		priority: 20,
@@ -206,14 +215,17 @@ export default function (pi: ExtensionAPI) {
 			const state = latestMindModeState(ctx.sessionManager.getEntries());
 			return Boolean(activeMindSlug || (state?.active && state.slug));
 		},
-		exit: async (ctx) => {
-			await deactivateMind(
+		leave: async (ctx) => {
+			await leaveMind(
 				ctx as unknown as MindModeCommandContext,
-				"exit command",
+				"leave command",
 			);
 		},
+		detach: async (ctx) => {
+			await detachMind(ctx as unknown as MindModeCommandContext);
+		},
 	});
-	registerExitCommand(pi);
+	registerSessionCommands(pi);
 
 	function showMindList(ctx: MindModeCommandContext): void {
 		let slugs: string[];
@@ -385,6 +397,15 @@ export default function (pi: ExtensionAPI) {
 	});
 }
 
+function safeGetLeafId(ctx: MindModeCommandContext): string | undefined {
+	try {
+		const id = ctx.sessionManager.getLeafId?.();
+		return id ?? undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 function mindArgumentCompletions(prefix: string): AutocompleteItem[] | null {
 	const query = prefix.trimStart().toLowerCase();
 	const items: AutocompleteItem[] = safeListGenesisMinds(".").map((slug) => ({
@@ -399,7 +420,7 @@ function mindArgumentCompletions(prefix: string): AutocompleteItem[] | null {
 }
 
 function mindUsageText(): string {
-	return "Usage: /mind <slug>, /mind list, /mind create, or /mind help. Use /exit to leave an active mind.";
+	return "Usage: /mind <slug>, /mind list, /mind create, or /mind help. Use /leave or /detach to end an active mind.";
 }
 
 function createMindText(): string {

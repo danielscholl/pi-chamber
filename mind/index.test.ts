@@ -27,14 +27,9 @@ type TestStatus = {
 	value: string | undefined;
 };
 
-type TestNewSession = {
-	parentSession?: string;
-	customEntries: Array<{ customType: string; data?: unknown }>;
-	sessionNames: string[];
-};
-
-type TestSwitchSession = {
-	sessionPath: string;
+type TestForkCall = {
+	entryId: string;
+	position?: "before" | "at";
 };
 
 type TestContext = {
@@ -43,28 +38,24 @@ type TestContext = {
 	notifications: TestNotification[];
 	statuses: TestStatus[];
 	entries: Array<Record<string, unknown>>;
+	leafId: string | null;
 	selectValue?: string;
 	selectOptions: string[][];
-	sessionFile?: string;
-	newSessions: TestNewSession[];
-	switches: TestSwitchSession[];
+	forkCalls: TestForkCall[];
+	forkResult: { cancelled?: boolean };
+	forkThrows?: Error;
 	waitForIdleCount: number;
 	sessionManager: {
 		getEntries(): Array<Record<string, unknown>>;
-		getSessionFile?(): string | undefined;
+		getLeafId?(): string | null;
 	};
 	waitForIdle?(): Promise<void>;
-	newSession?(options?: {
-		parentSession?: string;
-		setup?: (sessionManager: {
-			appendCustomEntry(customType: string, data?: unknown): string;
-			appendSessionInfo(name: string): string;
-		}) => Promise<void> | void;
-		withSession?: (ctx: TestContext) => Promise<void> | void;
-	}): Promise<{ cancelled?: boolean }>;
-	switchSession?(
-		sessionPath: string,
-		options?: { withSession?: (ctx: TestContext) => Promise<void> | void },
+	fork?(
+		entryId: string,
+		options?: {
+			position?: "before" | "at";
+			withSession?: (ctx: TestContext) => Promise<void> | void;
+		},
 	): Promise<{ cancelled?: boolean }>;
 	ui: {
 		notify(message: string, type?: "info" | "warning" | "error"): void;
@@ -136,6 +127,9 @@ function createHarness(entries: Array<Record<string, unknown>> = []) {
 		},
 		appendEntry(stream: string, entry: Record<string, unknown>) {
 			appendEntries.push({ stream, entry });
+			// Mirror real Pi behavior: persisted custom entries become readable
+			// via sessionManager.getEntries() in subsequent reads.
+			entries.push({ type: "custom", customType: stream, data: entry });
 		},
 	};
 
@@ -149,34 +143,36 @@ function createContext(
 	overrides: Partial<{
 		hasUI: boolean;
 		selectValue: string;
-		sessionFile: string;
-		enableSessionControl: boolean;
+		leafId: string | null;
+		enableFork: boolean;
+		forkResult: { cancelled?: boolean };
+		forkThrows: Error;
 	}> = {},
 ): TestContext {
 	const notifications: TestNotification[] = [];
 	const statuses: TestStatus[] = [];
 	const selectOptions: string[][] = [];
-	const newSessions: TestNewSession[] = [];
-	const switches: TestSwitchSession[] = [];
+	const forkCalls: TestForkCall[] = [];
 	const ctx: TestContext = {
 		cwd,
 		hasUI: overrides.hasUI ?? true,
 		notifications,
 		statuses,
 		entries,
+		leafId: overrides.leafId ?? null,
 		selectValue: overrides.selectValue,
 		selectOptions,
-		sessionFile: overrides.sessionFile,
-		newSessions,
-		switches,
+		forkCalls,
+		forkResult: overrides.forkResult ?? { cancelled: false },
+		forkThrows: overrides.forkThrows,
 		waitForIdleCount: 0,
 		sessionManager: {
 			getEntries() {
 				return entries;
 			},
-			getSessionFile: overrides.sessionFile
-				? () => overrides.sessionFile
-				: undefined,
+			getLeafId() {
+				return ctx.leafId;
+			},
 		},
 		ui: {
 			notify(message, type) {
@@ -192,34 +188,15 @@ function createContext(
 		},
 	};
 
-	if (overrides.enableSessionControl) {
+	if (overrides.enableFork) {
 		ctx.waitForIdle = async () => {
 			ctx.waitForIdleCount += 1;
 		};
-		ctx.newSession = async (options) => {
-			const record: TestNewSession = {
-				parentSession: options?.parentSession,
-				customEntries: [],
-				sessionNames: [],
-			};
-			newSessions.push(record);
-			await options?.setup?.({
-				appendCustomEntry(customType, data) {
-					record.customEntries.push({ customType, data });
-					return `custom-${record.customEntries.length}`;
-				},
-				appendSessionInfo(name) {
-					record.sessionNames.push(name);
-					return `session-info-${record.sessionNames.length}`;
-				},
-			});
+		ctx.fork = async (entryId, options) => {
+			forkCalls.push({ entryId, position: options?.position });
+			if (ctx.forkThrows) throw ctx.forkThrows;
 			await options?.withSession?.(ctx);
-			return { cancelled: false };
-		};
-		ctx.switchSession = async (sessionPath, options) => {
-			switches.push({ sessionPath });
-			await options?.withSession?.(ctx);
-			return { cancelled: false };
+			return ctx.forkResult;
 		};
 	}
 
@@ -242,7 +219,7 @@ async function runHandler(
 function stateEntry(
 	active: boolean,
 	slug?: string,
-	returnSessionFile?: string,
+	preMindLeafId?: string,
 ): Record<string, unknown> {
 	return {
 		type: "custom",
@@ -250,7 +227,7 @@ function stateEntry(
 		data: {
 			active,
 			...(slug ? { slug } : {}),
-			...(returnSessionFile ? { returnSessionFile } : {}),
+			...(preMindLeafId ? { preMindLeafId } : {}),
 		},
 	};
 }
@@ -281,6 +258,8 @@ describe("mind extension", () => {
 					}),
 				);
 				expect(ctx.notifications[0].message).toContain("ariadne");
+				expect(ctx.notifications[0].message).toContain("/leave");
+				expect(ctx.notifications[0].message).toContain("/detach");
 			} finally {
 				process.chdir(originalCwd);
 			}
@@ -319,11 +298,11 @@ describe("mind extension", () => {
 		});
 	});
 
-	test("/mind <slug> activates a complete mind and appends state", async () => {
+	test("/mind <slug> activates a complete mind in-place and captures the pre-mind leaf id", async () => {
 		await withTempProject(async (cwd) => {
 			writeCompleteMind(cwd, "miss-moneypenny");
 			const harness = createHarness();
-			const ctx = createContext(cwd);
+			const ctx = createContext(cwd, [], { leafId: "entry-42" });
 
 			await harness.commands.get("mind")?.handler("miss-moneypenny", ctx);
 
@@ -334,97 +313,51 @@ describe("mind extension", () => {
 					active: true,
 					slug: "miss-moneypenny",
 					mindPath: ".pi/minds/miss-moneypenny",
+					preMindLeafId: "entry-42",
 				}),
 			});
 			expect(ctx.statuses).toContainEqual({
 				key: "mind",
-				value: " miss-moneypenny",
+				value: expect.stringContaining("miss-moneypenny"),
 			});
 			expect(ctx.notifications[0].message).toContain("Mind mode active");
+			expect(ctx.notifications[0].message).toContain("/leave");
+			expect(ctx.notifications[0].message).toContain("/detach");
 		});
 	});
 
-	test("/mind <slug> starts a dedicated mind session when session control is available", async () => {
+	test("/mind <slug> activates in-place even when fork is available — no session swap", async () => {
 		await withTempProject(async (cwd) => {
 			writeCompleteMind(cwd, "miss-moneypenny");
 			const harness = createHarness();
 			const ctx = createContext(cwd, [], {
-				sessionFile: "/sessions/normal.jsonl",
-				enableSessionControl: true,
+				leafId: "entry-7",
+				enableFork: true,
 			});
 
 			await harness.commands.get("mind")?.handler("miss-moneypenny", ctx);
 
-			expect(harness.appendEntries).toHaveLength(0);
-			expect(ctx.waitForIdleCount).toBe(1);
-			expect(ctx.newSessions).toHaveLength(1);
-			expect(ctx.newSessions[0].parentSession).toBe("/sessions/normal.jsonl");
-			expect(ctx.newSessions[0].sessionNames).toEqual([
-				"Mind: miss-moneypenny",
-			]);
-			expect(ctx.newSessions[0].customEntries).toEqual([
-				expect.objectContaining({
-					customType: "mind-state",
-					data: expect.objectContaining({
-						active: true,
-						slug: "miss-moneypenny",
-						returnSessionFile: "/sessions/normal.jsonl",
-					}),
-				}),
-			]);
-			expect(ctx.statuses).toContainEqual({
-				key: "mind",
-				value: " miss-moneypenny",
-			});
-			expect(ctx.notifications[0].message).toContain(
-				"dedicated session: miss-moneypenny",
-			);
-		});
-	});
-
-	test("/exit returns from an isolated mind session to the previous session", async () => {
-		await withTempProject(async (cwd) => {
-			writeCompleteMind(cwd, "miss-moneypenny");
-			const entries = [
-				stateEntry(true, "miss-moneypenny", "/sessions/normal.jsonl"),
-			];
-			const harness = createHarness(entries);
-			const ctx = createContext(cwd, entries, {
-				sessionFile: "/sessions/mind.jsonl",
-				enableSessionControl: true,
-			});
-
-			await runHandler(harness, "session_start", { reason: "startup" }, ctx);
-			await harness.commands.get("exit")?.handler("", ctx);
-
-			expect(harness.appendEntries[harness.appendEntries.length - 1]).toEqual({
+			expect(ctx.forkCalls).toHaveLength(0);
+			expect(ctx.waitForIdleCount).toBe(0);
+			expect(harness.appendEntries[0]).toEqual({
 				stream: "mind-state",
 				entry: expect.objectContaining({
-					active: false,
+					active: true,
 					slug: "miss-moneypenny",
-					returnSessionFile: "/sessions/normal.jsonl",
+					preMindLeafId: "entry-7",
 				}),
 			});
-			expect(ctx.waitForIdleCount).toBe(1);
-			expect(ctx.switches).toEqual([{ sessionPath: "/sessions/normal.jsonl" }]);
-			expect(ctx.statuses[ctx.statuses.length - 1]).toEqual({
-				key: "mind",
-				value: undefined,
-			});
-			expect(ctx.notifications[0].message).toContain(
-				"Returned from miss-moneypenny",
-			);
 		});
 	});
 
-	test("/exit clears state, status, and injects an explicit normal-assistant guard", async () => {
+	test("/leave clears state, status, and injects an explicit normal-assistant guard", async () => {
 		await withTempProject(async (cwd) => {
 			writeCompleteMind(cwd, "miss-moneypenny");
 			const harness = createHarness();
 			const ctx = createContext(cwd);
 
 			await harness.commands.get("mind")?.handler("miss-moneypenny", ctx);
-			await harness.commands.get("exit")?.handler("", ctx);
+			await harness.commands.get("leave")?.handler("", ctx);
 			const result = (await runHandler(
 				harness,
 				"before_agent_start",
@@ -453,34 +386,39 @@ describe("mind extension", () => {
 		});
 	});
 
-	test("/exit leaves an active mind", async () => {
+	test("/leave keeps the conversation in the current session", async () => {
 		await withTempProject(async (cwd) => {
 			writeCompleteMind(cwd, "miss-moneypenny");
 			const harness = createHarness();
 			const ctx = createContext(cwd);
 
 			await harness.commands.get("mind")?.handler("miss-moneypenny", ctx);
-			await harness.commands.get("exit")?.handler("", ctx);
+			await harness.commands.get("leave")?.handler("", ctx);
 
-			expect(harness.appendEntries[harness.appendEntries.length - 1]).toEqual({
+			const lastEntry =
+				harness.appendEntries[harness.appendEntries.length - 1];
+			expect(lastEntry).toEqual({
 				stream: "mind-state",
 				entry: expect.objectContaining({
 					active: false,
 					slug: "miss-moneypenny",
-					reason: "exit command",
+					reason: "leave command",
 				}),
 			});
 			expect(ctx.statuses[ctx.statuses.length - 1]).toEqual({
 				key: "mind",
 				value: undefined,
 			});
-			expect(ctx.notifications[ctx.notifications.length - 1].message).toContain(
-				"Mind mode off",
-			);
+			expect(
+				ctx.notifications[ctx.notifications.length - 1].message,
+			).toContain("Mind mode off");
+			expect(
+				ctx.notifications[ctx.notifications.length - 1].message,
+			).toContain("conversation continues in this session");
 		});
 	});
 
-	test("/mind off is not an exit alias", async () => {
+	test("/mind off is not a leave alias", async () => {
 		await withTempProject(async (cwd) => {
 			writeCompleteMind(cwd, "miss-moneypenny");
 			const harness = createHarness();
@@ -493,7 +431,7 @@ describe("mind extension", () => {
 			expect(harness.appendEntries).toHaveLength(before);
 			expect(ctx.statuses[ctx.statuses.length - 1]).toEqual({
 				key: "mind",
-				value: " miss-moneypenny",
+				value: expect.stringContaining("miss-moneypenny"),
 			});
 			expect(ctx.notifications[ctx.notifications.length - 1]).toEqual(
 				expect.objectContaining({
@@ -536,7 +474,7 @@ describe("mind extension", () => {
 			expect(ctx.selectOptions[0]).not.toContain("(off)");
 			expect(ctx.statuses).toContainEqual({
 				key: "mind",
-				value: " jarvis",
+				value: expect.stringContaining("jarvis"),
 			});
 		});
 	});
@@ -609,7 +547,7 @@ describe("mind extension", () => {
 
 			expect(ctx.statuses).toContainEqual({
 				key: "mind",
-				value: " miss-moneypenny",
+				value: expect.stringContaining("miss-moneypenny"),
 			});
 			expect(result.systemPrompt).toContain("# Active Genesis Mind");
 		});
@@ -651,7 +589,7 @@ describe("mind extension", () => {
 			const ctx = createContext(cwd);
 
 			await harness.commands.get("mind")?.handler("miss-moneypenny", ctx);
-			await harness.commands.get("exit")?.handler("", ctx);
+			await harness.commands.get("leave")?.handler("", ctx);
 
 			const first = (await runHandler(
 				harness,
@@ -673,38 +611,148 @@ describe("mind extension", () => {
 			);
 
 			expect(first.systemPrompt).toContain("# Genesis Mind Mode Off");
-			// After the first fire, the guard is consumed: the model has been
-			// told once not to roleplay; further turns rely on base instructions.
 			expect(second).toBeUndefined();
 			expect(third).toBeUndefined();
 		});
 	});
 
-	test("returning from a dedicated mind session does not pollute the parent with a guard", async () => {
+	test("/detach forks at the captured pre-mind leaf id and switches into the fork", async () => {
 		await withTempProject(async (cwd) => {
 			writeCompleteMind(cwd, "miss-moneypenny");
-			const entries = [
-				stateEntry(true, "miss-moneypenny", "/sessions/normal.jsonl"),
-			];
-			const harness = createHarness(entries);
-			const ctx = createContext(cwd, entries, {
-				sessionFile: "/sessions/mind.jsonl",
-				enableSessionControl: true,
+			const sharedEntries: Array<Record<string, unknown>> = [];
+			const harness = createHarness(sharedEntries);
+			const ctx = createContext(cwd, sharedEntries, {
+				leafId: "entry-pre-mind",
+				enableFork: true,
 			});
 
-			await runHandler(harness, "session_start", { reason: "startup" }, ctx);
-			await harness.commands.get("exit")?.handler("", ctx);
+			await harness.commands.get("mind")?.handler("miss-moneypenny", ctx);
+			await harness.commands.get("detach")?.handler("", ctx);
 
-			// After /exit triggers switchSession back to the parent, the parent
-			// session never had this mind active in its own transcript, so the
-			// next before_agent_start should not inject any guard.
-			const result = await runHandler(
-				harness,
-				"before_agent_start",
-				{ systemPrompt: "base" },
-				ctx,
+			// Activation persists active state + preMindLeafId; detach persists a
+			// final "deactivated" state to the artifact session before forking.
+			expect(harness.appendEntries).toEqual([
+				expect.objectContaining({
+					stream: "mind-state",
+					entry: expect.objectContaining({
+						active: true,
+						slug: "miss-moneypenny",
+						preMindLeafId: "entry-pre-mind",
+					}),
+				}),
+				expect.objectContaining({
+					stream: "mind-state",
+					entry: expect.objectContaining({
+						active: false,
+						slug: "miss-moneypenny",
+						reason: "detach",
+					}),
+				}),
+			]);
+			expect(ctx.forkCalls).toEqual([
+				{ entryId: "entry-pre-mind", position: "at" },
+			]);
+			expect(ctx.waitForIdleCount).toBe(1);
+			expect(ctx.statuses[ctx.statuses.length - 1]).toEqual({
+				key: "mind",
+				value: undefined,
+			});
+			expect(
+				ctx.notifications[ctx.notifications.length - 1].message,
+			).toContain("Detached from miss-moneypenny");
+		});
+	});
+
+	test("/detach falls back to /leave when no pre-mind leaf id was captured", async () => {
+		await withTempProject(async (cwd) => {
+			writeCompleteMind(cwd, "miss-moneypenny");
+			const harness = createHarness();
+			// leafId left null: getLeafId returns null, no preMindLeafId stored.
+			const ctx = createContext(cwd, [], { enableFork: true });
+
+			await harness.commands.get("mind")?.handler("miss-moneypenny", ctx);
+			await harness.commands.get("detach")?.handler("", ctx);
+
+			expect(ctx.forkCalls).toHaveLength(0);
+			expect(
+				ctx.notifications.find((n) =>
+					n.message.includes("no pre-mind fork point"),
+				),
+			).toEqual(
+				expect.objectContaining({
+					type: "warning",
+				}),
 			);
-			expect(result).toBeUndefined();
+			// Fallback persists a leave-style deactivation entry.
+			const last = harness.appendEntries[harness.appendEntries.length - 1];
+			expect(last).toEqual({
+				stream: "mind-state",
+				entry: expect.objectContaining({
+					active: false,
+					slug: "miss-moneypenny",
+					reason: "detach fallback",
+				}),
+			});
+		});
+	});
+
+	test("/detach falls back to /leave when ctx.fork is unavailable", async () => {
+		await withTempProject(async (cwd) => {
+			writeCompleteMind(cwd, "miss-moneypenny");
+			const harness = createHarness();
+			// enableFork: false → ctx.fork is undefined even though leafId is set.
+			const ctx = createContext(cwd, [], { leafId: "entry-pre-mind" });
+
+			await harness.commands.get("mind")?.handler("miss-moneypenny", ctx);
+			await harness.commands.get("detach")?.handler("", ctx);
+
+			expect(
+				ctx.notifications.find((n) =>
+					n.message.includes("no pre-mind fork point"),
+				),
+			).toEqual(
+				expect.objectContaining({
+					type: "warning",
+				}),
+			);
+		});
+	});
+
+	test("/detach reports a warning when the fork primitive throws", async () => {
+		await withTempProject(async (cwd) => {
+			writeCompleteMind(cwd, "miss-moneypenny");
+			const sharedEntries: Array<Record<string, unknown>> = [];
+			const harness = createHarness(sharedEntries);
+			const ctx = createContext(cwd, sharedEntries, {
+				leafId: "entry-pre-mind",
+				enableFork: true,
+				forkThrows: new Error("fork unavailable"),
+			});
+
+			await harness.commands.get("mind")?.handler("miss-moneypenny", ctx);
+			await harness.commands.get("detach")?.handler("", ctx);
+
+			expect(ctx.forkCalls).toHaveLength(1);
+			expect(
+				ctx.notifications[ctx.notifications.length - 1].message,
+			).toContain("Detach failed");
+		});
+	});
+
+	test("/detach with no active mind reports nothing to detach", async () => {
+		await withTempProject(async (cwd) => {
+			const harness = createHarness();
+			const ctx = createContext(cwd, [], { enableFork: true });
+
+			await harness.commands.get("detach")?.handler("", ctx);
+
+			expect(ctx.forkCalls).toHaveLength(0);
+			expect(ctx.notifications).toEqual([
+				expect.objectContaining({
+					type: "info",
+					message: expect.stringContaining("No active mind or room to detach"),
+				}),
+			]);
 		});
 	});
 });
