@@ -54,7 +54,7 @@ Do not bypass Genesis authoring rules. Live `/genesis` requests still write gene
 
 ## Genesis rules
 
-- v1 output stays inside the consumer project: `.pi/minds` and `.pi/agents`.
+- v1 output stays inside the consumer project: `.pi/minds`, `.pi/agents`, and (when `seedLensViews` is on, the default) a starter newspaper lens under `.pi/observatory/lenses/<slug>-newspaper/`.
 - Do not add network calls, registry fetches, automatic commits, lens seeding, or chamber runtime coupling unless explicitly requested.
 - The extension owns generated file writes through `genesis_write_files`; do not bypass that flow during a live `/genesis` request.
 - Validate path containment with robust path helpers, not string-prefix checks.
@@ -94,7 +94,9 @@ If a `/genesis` prompt provides a `requestId`, call `genesis_write_files` exactl
 - Lens files live at `.pi/observatory/lenses/<slug>/lens.json` plus a data file referenced by the manifest's `source` field.
 - v1 manifest schema: `name`, `kind` (`briefing` or `status-board`), `source` (bare filename), optional `icon`, optional `description`. Anything else is silently ignored.
 - `source` must be a bare filename. The framework rejects `/`, `..`, absolute paths, and the literal `lens.json`. Symlinked data files are also rejected.
-- v1 lens kinds are only `briefing` (flat object → key/value rows) and `status-board` (array of `{name, status, ...}` → status blocks). `form`, `table`, `detail`, `timeline`, `editor` are future work.
+- v1 lens kinds are only `briefing` and `status-board`. `form`, `table`, `detail`, `timeline`, `editor`, and `kind: "page"` are future work.
+- A `briefing` data file may use either of two shapes. **Sectioned** is preferred: a JSON object with any of the reserved sections `summary`, `status`, `priority`, `metrics`, `activity`, `lists`, `narrative`, `details` — the renderer composes a page with one bordered `PriorityCard` plus labeled `Section` blocks (no other borders). **Flat** legacy: any other JSON object renders as a uniform card grid of key/value cells. Detection is automatic via `observatory/page.ts:isSectionedShape`. Unknown top-level keys in sectioned data are ignored (forward-compat).
+- A `status-board` data file is an array of `{name, status, ...}` entries → status blocks. Unchanged.
 - v1 has no `prompt`, no `refreshOn`, no `schema`, and no writeback. Refresh = filesystem watch (debounced 300ms) plus manual `r`.
 - Keep deterministic discovery, validation, and path-containment helpers in `observatory/core.ts` with Bun tests.
 - Keep render functions in `observatory/tui/render-*.ts` pure — they take data + width and return `string[]`. The component layer owns side effects (watcher, theme application, requestRender).

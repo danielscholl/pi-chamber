@@ -58,32 +58,35 @@ describe("navigation in list mode", () => {
 			manifestEntry("ops"),
 			manifestEntry("room"),
 		]);
+		// Items: group(0), dashboard(1), ops(2), room(3), sep(4), group(5), rs(6).
+		// Initial selection: dashboard at 1.
 		const ctx = makeCtx();
 		handleObservatoryInput(state, "j", ctx);
-		expect(state.selectedSidebarIndex).toBe(1);
+		expect(state.selectedSidebarIndex).toBe(2);
 		expect(state.selection).toEqual({ kind: "lens", lensId: "ops" });
 		handleObservatoryInput(state, "j", ctx);
-		expect(state.selectedSidebarIndex).toBe(2);
-		// Past the end clamps to last
+		expect(state.selectedSidebarIndex).toBe(3);
+		// Past the last selectable: stays at room (3) — separator/group/rs are skipped.
 		handleObservatoryInput(state, "j", ctx);
-		expect(state.selectedSidebarIndex).toBe(2);
+		expect(state.selectedSidebarIndex).toBe(3);
 		// k moves up
 		handleObservatoryInput(state, "k", ctx);
+		expect(state.selectedSidebarIndex).toBe(2);
+		// Past the top: stays at dashboard (1) — group LENSES at 0 is skipped.
+		handleObservatoryInput(state, "k", ctx);
+		handleObservatoryInput(state, "k", ctx);
 		expect(state.selectedSidebarIndex).toBe(1);
-		// Past the top clamps to dashboard
-		handleObservatoryInput(state, "k", ctx);
-		handleObservatoryInput(state, "k", ctx);
-		expect(state.selectedSidebarIndex).toBe(0);
 		expect(state.selection).toEqual({ kind: "dashboard" });
 	});
 
 	test("arrow keys mirror j/k", () => {
 		const state = createObservatoryViewState([manifestEntry("ops")]);
 		const ctx = makeCtx();
+		// Initial: dashboard at 1.
 		handleObservatoryInput(state, "\x1b[B", ctx);
-		expect(state.selectedSidebarIndex).toBe(1);
+		expect(state.selectedSidebarIndex).toBe(2);
 		handleObservatoryInput(state, "\x1b[A", ctx);
-		expect(state.selectedSidebarIndex).toBe(0);
+		expect(state.selectedSidebarIndex).toBe(1);
 	});
 
 	test("enter/right enters detail mode", () => {
@@ -121,7 +124,7 @@ describe("exit semantics", () => {
 describe("refresh and toggles", () => {
 	test("r drops the selected lens from the cache and calls refresh", () => {
 		const state = createObservatoryViewState([manifestEntry("ops")]);
-		setSelectedIndex(state, 1);
+		setSelectedIndex(state, 2);
 		setLensData(state, "ops", { ok: true, data: { x: 1 } });
 		const ctx = makeCtx();
 		handleObservatoryInput(state, "r", ctx);
@@ -165,7 +168,7 @@ describe("help mode", () => {
 describe("scroll in detail mode", () => {
 	test("j/k scrolls and clamps to viewport", () => {
 		const state = createObservatoryViewState([manifestEntry("ops")]);
-		setSelectedIndex(state, 1);
+		setSelectedIndex(state, 2);
 		state.mode = "detail";
 		const ctx = makeCtx({ contentLines: 10, viewport: 5 });
 		// Max scroll = 10 - 5 = 5
@@ -181,7 +184,7 @@ describe("scroll in detail mode", () => {
 
 	test("ctrl-d / ctrl-u half-page scroll", () => {
 		const state = createObservatoryViewState([manifestEntry("ops")]);
-		setSelectedIndex(state, 1);
+		setSelectedIndex(state, 2);
 		state.mode = "detail";
 		const ctx = makeCtx({ contentLines: 100, viewport: 20 });
 		handleObservatoryInput(state, "\x04", ctx);
@@ -192,7 +195,7 @@ describe("scroll in detail mode", () => {
 
 	test("gg jumps to top, G jumps to bottom", () => {
 		const state = createObservatoryViewState([manifestEntry("ops")]);
-		setSelectedIndex(state, 1);
+		setSelectedIndex(state, 2);
 		state.mode = "detail";
 		const ctx = makeCtx({ contentLines: 50, viewport: 10 });
 		handleObservatoryInput(state, "G", ctx);
@@ -206,7 +209,7 @@ describe("scroll in detail mode", () => {
 
 	test("any other key resets the gg chord", () => {
 		const state = createObservatoryViewState([manifestEntry("ops")]);
-		setSelectedIndex(state, 1);
+		setSelectedIndex(state, 2);
 		state.mode = "detail";
 		const ctx = makeCtx({ contentLines: 50, viewport: 10 });
 		handleObservatoryInput(state, "g", ctx);

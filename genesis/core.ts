@@ -10,6 +10,17 @@ import {
 // biome-ignore lint/suspicious/noTsIgnore: Project runtime provides Node built-ins; this workspace does not install @types/node.
 // @ts-ignore
 import path from "node:path";
+// biome-ignore lint/suspicious/noTsIgnore: Project runtime provides Node built-ins; this workspace does not install @types/node.
+// @ts-ignore
+import { fileURLToPath } from "node:url";
+
+// Where the bundled shared doctrine templates live, relative to this module.
+// Resolved at load time so seedSharedDoctrine can read them without callers
+// having to know about the package layout.
+const SHARED_TEMPLATES_DIR = path.join(
+	path.dirname(fileURLToPath(import.meta.url)),
+	"shared",
+);
 
 export const IDEA_FOLDERS = [
 	"inbox",
@@ -34,7 +45,7 @@ export interface GenesisConfig {
 	defaultRole: string;
 	defaultVoice: string;
 	commit: false;
-	seedLensViews: false;
+	seedLensViews: boolean;
 	bootstrapSkills: false;
 }
 
@@ -91,7 +102,7 @@ export const DEFAULT_GENESIS_CONFIG: GenesisConfig = {
 	defaultRole: "OSDU Assistant",
 	defaultVoice: "clear, practical, technically sharp",
 	commit: false,
-	seedLensViews: false,
+	seedLensViews: true,
 	bootstrapSkills: false,
 };
 
@@ -267,6 +278,33 @@ export function createMindStructure(paths: GenesisPaths): void {
 			writeFileSync(placeholderPath, "", "utf-8");
 		}
 	}
+}
+
+// Seed the project's shared mind doctrine (IDEA.md, OBSERVATORY.md) from
+// the bundled templates, but only when the target files don't already
+// exist. Returns the absolute paths of any files actually written, so the
+// caller can surface "seeded N files" feedback. Never overwrites; if the
+// operator has customized doctrine already, this is a no-op for that file.
+export function seedSharedDoctrine(paths: GenesisPaths): string[] {
+	mkdirSync(paths.sharedMindPath, { recursive: true });
+	const targets: Array<{ target: string; template: string }> = [
+		{
+			target: paths.sharedIdeaPath,
+			template: path.join(SHARED_TEMPLATES_DIR, SHARED_IDEA_FILE),
+		},
+		{
+			target: paths.sharedObservatoryPath,
+			template: path.join(SHARED_TEMPLATES_DIR, SHARED_OBSERVATORY_FILE),
+		},
+	];
+	const seeded: string[] = [];
+	for (const { target, template } of targets) {
+		if (existsSync(target)) continue;
+		if (!existsSync(template)) continue;
+		writeFileSync(target, readFileSync(template, "utf-8"), "utf-8");
+		seeded.push(target);
+	}
+	return seeded;
 }
 
 export function validateMind(paths: GenesisPaths): ValidationResult {

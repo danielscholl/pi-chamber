@@ -1,4 +1,10 @@
 import type { DiscoveryEntry, LensDataResult } from "../core.ts";
+import {
+	type SidebarItem,
+	buildSidebarItems,
+	findSelectableIndex,
+	isSelectableItem,
+} from "./render-sidebar.ts";
 
 export type ObservatorySelection =
 	| { kind: "dashboard" }
@@ -22,6 +28,7 @@ export interface ObservatoryViewState {
 	notification: ObservatoryNotification | null;
 	pendingG: boolean;
 	entries: DiscoveryEntry[];
+	sidebarItems: SidebarItem[];
 	lensDataCache: Map<string, LensDataResult>;
 	lastRefreshAt: number;
 }
@@ -29,7 +36,7 @@ export interface ObservatoryViewState {
 export function createObservatoryViewState(
 	entries: DiscoveryEntry[] = [],
 ): ObservatoryViewState {
-	return {
+	const state: ObservatoryViewState = {
 		selection: { kind: "dashboard" },
 		selectedSidebarIndex: 0,
 		mode: "list",
@@ -39,34 +46,74 @@ export function createObservatoryViewState(
 		notification: null,
 		pendingG: false,
 		entries,
+		sidebarItems: [],
 		lensDataCache: new Map(),
 		lastRefreshAt: Date.now(),
 	};
+	setSidebarItems(state, buildSidebarItems(entries, [], []));
+	return state;
 }
 
 export function sidebarItemCount(state: ObservatoryViewState): number {
-	return 1 + state.entries.length;
+	return state.sidebarItems.length;
 }
 
 export function selectionForIndex(
 	state: ObservatoryViewState,
 	index: number,
 ): ObservatorySelection {
-	if (index <= 0) return { kind: "dashboard" };
-	const entry = state.entries[index - 1];
-	if (!entry) return { kind: "dashboard" };
-	return { kind: "lens", lensId: entry.id };
+	const item = state.sidebarItems[index];
+	if (!item || !isSelectableItem(item)) return { kind: "dashboard" };
+	if (item.kind === "dashboard") return { kind: "dashboard" };
+	return { kind: "lens", lensId: item.id };
 }
 
 export function setSelectedIndex(
 	state: ObservatoryViewState,
 	index: number,
 ): void {
-	const total = sidebarItemCount(state);
-	const clamped = Math.max(0, Math.min(total - 1, index));
-	state.selectedSidebarIndex = clamped;
-	state.selection = selectionForIndex(state, clamped);
+	const items = state.sidebarItems;
+	if (items.length === 0) return;
+	const direction: 1 | -1 = index >= state.selectedSidebarIndex ? 1 : -1;
+	const found = findSelectableIndex(items, index, direction);
+	if (found < 0) return;
+	state.selectedSidebarIndex = found;
+	state.selection = selectionForIndex(state, found);
 	state.bodyScrollOffset = 0;
+}
+
+// Replaces sidebarItems with `items` and re-resolves selection by id so
+// the active lens stays selected across discovery refreshes.
+export function setSidebarItems(
+	state: ObservatoryViewState,
+	items: SidebarItem[],
+): void {
+	state.sidebarItems = items;
+	if (items.length === 0) {
+		state.selectedSidebarIndex = 0;
+		state.selection = { kind: "dashboard" };
+		return;
+	}
+	const preferredId =
+		state.selection.kind === "lens" ? state.selection.lensId : "__dashboard__";
+	let foundIndex = -1;
+	for (let i = 0; i < items.length; i++) {
+		const it = items[i];
+		if (isSelectableItem(it) && it.id === preferredId) {
+			foundIndex = i;
+			break;
+		}
+	}
+	if (foundIndex < 0) {
+		foundIndex = items.findIndex(isSelectableItem);
+	}
+	if (foundIndex < 0) {
+		state.selectedSidebarIndex = 0;
+		state.selection = { kind: "dashboard" };
+		return;
+	}
+	state.selectedSidebarIndex = foundIndex;
+	state.selection = selectionForIndex(state, foundIndex);
 }
 
 export function setEntries(
@@ -75,22 +122,9 @@ export function setEntries(
 ): void {
 	state.entries = entries;
 	state.lastRefreshAt = Date.now();
-	if (state.selection.kind === "lens") {
-		const targetId = state.selection.lensId;
-		const newIndex = entries.findIndex((e) => e.id === targetId);
-		if (newIndex < 0) {
-			state.selection = { kind: "dashboard" };
-			state.selectedSidebarIndex = 0;
-			state.bodyScrollOffset = 0;
-		} else {
-			state.selectedSidebarIndex = newIndex + 1;
-		}
-	}
-	const total = sidebarItemCount(state);
-	if (state.selectedSidebarIndex >= total) {
-		state.selectedSidebarIndex = Math.max(0, total - 1);
-		state.selection = selectionForIndex(state, state.selectedSidebarIndex);
-	}
+	// Rebuild items with empty mind/room context. The component is expected
+	// to follow up with setSidebarItems to inject live mind + room data.
+	setSidebarItems(state, buildSidebarItems(entries, [], []));
 }
 
 export function setLensData(

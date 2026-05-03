@@ -15,9 +15,12 @@ import {
 	DEFAULT_OBSERVATORY_CONFIG,
 	discoverLenses,
 	loadObservatoryConfig,
+	newspaperLensName,
+	newspaperLensSlug,
 	readLensData,
 	resolveDataFilePath,
 	resolveLensesRoot,
+	scaffoldNewspaper,
 	validateSourceFilename,
 	validateLensId,
 	validateLensManifest,
@@ -466,6 +469,101 @@ describe("readLensData", () => {
 			expect(badId.ok).toBe(false);
 			const badSource = readLensData(lensesRoot, "ops", { source: "../escape" });
 			expect(badSource.ok).toBe(false);
+		});
+	});
+});
+
+describe("newspaper helpers", () => {
+	test("newspaperLensSlug appends -newspaper", () => {
+		expect(newspaperLensSlug("jarvis")).toBe("jarvis-newspaper");
+		expect(newspaperLensSlug("ariadne-mind")).toBe("ariadne-mind-newspaper");
+	});
+
+	test("newspaperLensName title-cases the slug", () => {
+		expect(newspaperLensName("jarvis")).toBe("Jarvis Newspaper");
+		expect(newspaperLensName("ariadne-mind")).toBe("Ariadne Mind Newspaper");
+		expect(newspaperLensName("moneypenny")).toBe("Moneypenny Newspaper");
+	});
+});
+
+describe("scaffoldNewspaper", () => {
+	test("creates lens.json + data.json with sectioned shape when missing", () => {
+		withTempProject((cwd) => {
+			const lensesRoot = makeLensesRoot(cwd);
+			const result = scaffoldNewspaper(lensesRoot, "jarvis");
+			expect(result.created).toBe(true);
+			expect(result.lensSlug).toBe("jarvis-newspaper");
+			expect(fs.existsSync(result.manifestPath)).toBe(true);
+			expect(fs.existsSync(result.dataPath)).toBe(true);
+
+			const manifest = JSON.parse(
+				fs.readFileSync(result.manifestPath, "utf-8"),
+			);
+			expect(manifest.kind).toBe("briefing");
+			expect(manifest.name).toBe("Jarvis Newspaper");
+			expect(manifest.source).toBe("data.json");
+
+			const data = JSON.parse(fs.readFileSync(result.dataPath, "utf-8"));
+			expect(data.priority?.title).toBeDefined();
+			expect(data.priority?.body).toContain("jarvis");
+			expect(Array.isArray(data.activity)).toBe(true);
+		});
+	});
+
+	test("the scaffolded data file passes sectioned-shape detection", async () => {
+		withTempProject(async (cwd) => {
+			const lensesRoot = makeLensesRoot(cwd);
+			const result = scaffoldNewspaper(lensesRoot, "moneypenny");
+			const data = JSON.parse(fs.readFileSync(result.dataPath, "utf-8"));
+			const { isSectionedShape } = await import("./page.ts");
+			expect(isSectionedShape(data)).toBe(true);
+		});
+	});
+
+	test("idempotent: returns created=false and does not overwrite", () => {
+		withTempProject((cwd) => {
+			const lensesRoot = makeLensesRoot(cwd);
+			scaffoldNewspaper(lensesRoot, "jarvis");
+			// Operator customizes the file
+			const customManifest = JSON.stringify(
+				{
+					name: "Custom Name",
+					kind: "briefing",
+					source: "data.json",
+				},
+				null,
+				2,
+			);
+			const folder = path.join(lensesRoot, "jarvis-newspaper");
+			fs.writeFileSync(path.join(folder, "lens.json"), customManifest);
+			// Re-run
+			const result = scaffoldNewspaper(lensesRoot, "jarvis");
+			expect(result.created).toBe(false);
+			expect(result.reason).toMatch(/already exists/);
+			// Custom content preserved
+			const after = fs.readFileSync(path.join(folder, "lens.json"), "utf-8");
+			expect(after).toBe(customManifest);
+		});
+	});
+
+	test("each scaffolded lens passes discovery validation", () => {
+		withTempProject((cwd) => {
+			const lensesRoot = makeLensesRoot(cwd);
+			scaffoldNewspaper(lensesRoot, "jarvis");
+			scaffoldNewspaper(lensesRoot, "moneypenny");
+			const entries = discoverLenses(lensesRoot);
+			expect(entries.length).toBe(2);
+			for (const e of entries) {
+				expect(e.status).toBe("ok");
+			}
+		});
+	});
+
+	test("rejects mind slugs that would produce invalid lens ids", () => {
+		withTempProject((cwd) => {
+			const lensesRoot = makeLensesRoot(cwd);
+			expect(() => scaffoldNewspaper(lensesRoot, "Bad Slug")).toThrow();
+			expect(() => scaffoldNewspaper(lensesRoot, "")).toThrow();
 		});
 	});
 });

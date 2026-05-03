@@ -3,9 +3,11 @@
 import {
 	existsSync,
 	lstatSync,
+	mkdirSync,
 	readdirSync,
 	readFileSync,
 	statSync,
+	writeFileSync,
 } from "node:fs";
 // biome-ignore lint/suspicious/noTsIgnore: Project runtime provides Node built-ins; this workspace does not install @types/node.
 // @ts-ignore
@@ -349,4 +351,119 @@ export function readLensData(
 function errorMessage(error: unknown): string {
 	if (error instanceof Error) return error.message;
 	return String(error);
+}
+
+// ---------------------------------------------------------------------------
+// Newspaper scaffolding
+//
+// /observatory:newspaper [<slug>] writes a sectioned-briefing lens for one
+// Genesis mind (or every mind when no slug is given). The lens is a minimal
+// page with a placeholder priority — enough for the operator to see the lens
+// in the sidebar immediately. The mind populates the rest later by writing
+// its own data.json.
+// ---------------------------------------------------------------------------
+
+export interface ScaffoldNewspaperResult {
+	mindSlug: string;
+	lensSlug: string;
+	created: boolean;
+	reason?: string;
+	manifestPath: string;
+	dataPath: string;
+}
+
+export function newspaperLensSlug(mindSlug: string): string {
+	return `${mindSlug}-newspaper`;
+}
+
+export function newspaperLensName(mindSlug: string): string {
+	return `${titleCase(mindSlug)} Newspaper`;
+}
+
+export function newspaperManifest(mindSlug: string): {
+	name: string;
+	kind: LensKind;
+	source: string;
+	icon: string;
+	description: string;
+} {
+	return {
+		name: newspaperLensName(mindSlug),
+		kind: "briefing",
+		source: "data.json",
+		icon: "newspaper",
+		description: `Daily briefing authored by ${mindSlug}.`,
+	};
+}
+
+export function newspaperData(mindSlug: string): unknown {
+	return {
+		summary: `Awaiting first refresh from ${mindSlug}.`,
+		status: "ready",
+		priority: {
+			title: "Awaiting Content",
+			body: `Ask ${mindSlug} to populate this newspaper. The mind reads its IDEA notes and updates priority, metrics, activity, and narrative sections.`,
+			severity: "info",
+		},
+		activity: ["Newspaper scaffolded by /observatory:newspaper"],
+	};
+}
+
+// Scaffold a newspaper lens for one mind. Idempotent: if either lens.json or
+// the data file already exists at the target path, returns `created: false`
+// without touching the existing files.
+export function scaffoldNewspaper(
+	lensesRoot: string,
+	mindSlug: string,
+): ScaffoldNewspaperResult {
+	const lensSlug = newspaperLensSlug(mindSlug);
+	const idCheck = validateLensId(lensSlug);
+	if (!idCheck.ok) {
+		throw new Error(
+			`cannot scaffold newspaper for "${mindSlug}": ${idCheck.reason}`,
+		);
+	}
+	const lensFolder = path.resolve(lensesRoot, lensSlug);
+	assertInsideProject(lensesRoot, lensFolder, "newspaperLensFolder");
+	const manifestPath = path.join(lensFolder, LENS_MANIFEST_FILE);
+	const dataPath = path.join(lensFolder, "data.json");
+
+	if (existsSync(manifestPath) || existsSync(dataPath)) {
+		return {
+			mindSlug,
+			lensSlug,
+			created: false,
+			reason: "newspaper lens already exists",
+			manifestPath,
+			dataPath,
+		};
+	}
+
+	mkdirSync(lensFolder, { recursive: true });
+	writeFileSync(
+		manifestPath,
+		`${JSON.stringify(newspaperManifest(mindSlug), null, 2)}\n`,
+		"utf-8",
+	);
+	writeFileSync(
+		dataPath,
+		`${JSON.stringify(newspaperData(mindSlug), null, 2)}\n`,
+		"utf-8",
+	);
+	return {
+		mindSlug,
+		lensSlug,
+		created: true,
+		manifestPath,
+		dataPath,
+	};
+}
+
+function titleCase(slug: string): string {
+	return slug
+		.split("-")
+		.map((word) =>
+			word.length > 0 ? word[0].toUpperCase() + word.slice(1) : word,
+		)
+		.join(" ");
 }

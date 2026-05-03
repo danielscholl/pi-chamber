@@ -13,6 +13,7 @@ import {
 	assertInsideProject,
 	collapseOneLine,
 	createMindStructure,
+	seedSharedDoctrine,
 	ensureTrailingNewline,
 	type GenesisConfig,
 	type GenesisPaths,
@@ -34,6 +35,11 @@ import {
 	type GenesisStarter,
 } from "./starters.ts";
 import { listGenesisMinds } from "../mind/core.ts";
+import {
+	loadObservatoryConfig,
+	resolveLensesRoot,
+	scaffoldNewspaper,
+} from "../observatory/core.ts";
 
 const REQUEST_EXPIRATION_MS = 10 * 60 * 1000;
 
@@ -301,6 +307,7 @@ export default function (pi: ExtensionAPI) {
 
 		try {
 			createMindStructure(paths);
+			seedSharedDoctrine(paths);
 		} catch (error) {
 			notify(
 				ctx,
@@ -308,6 +315,22 @@ export default function (pi: ExtensionAPI) {
 				"error",
 			);
 			return;
+		}
+
+		if (config.seedLensViews) {
+			try {
+				const observatoryConfig = loadObservatoryConfig(paths.cwd);
+				const lensesRoot = resolveLensesRoot(paths.cwd, observatoryConfig);
+				scaffoldNewspaper(lensesRoot, slug);
+			} catch (error) {
+				// Non-fatal: genesis still proceeds. Operator can run
+				// /observatory:newspaper later to fill in.
+				notify(
+					ctx,
+					`Genesis could not seed starter newspaper: ${errorMessage(error)}`,
+					"warning",
+				);
+			}
 		}
 
 		const request: PendingGenesisRequest = {

@@ -1,3 +1,6 @@
+import type { LensManifest } from "../core.ts";
+import { isSectionedShape, parseBriefingPage } from "../page.ts";
+import { renderBriefingPage } from "./render-briefing-page.ts";
 import { type Colorize, noColorize } from "./widgets/types.ts";
 import { card } from "./widgets/card.ts";
 import { grid } from "./widgets/grid.ts";
@@ -47,8 +50,13 @@ export function renderBriefing(
 	width: number,
 	expandValues = false,
 	colorize: Colorize = noColorize,
+	manifest?: Pick<LensManifest, "name" | "kind">,
 ): string[] {
 	const w = Math.max(20, width);
+	if (manifest && isSectionedShape(data)) {
+		const { page } = parseBriefingPage(data);
+		return renderBriefingPage({ manifest, page, width: w, colorize });
+	}
 	if (!data || typeof data !== "object" || Array.isArray(data)) {
 		return [truncateToWidth("(empty briefing — data should be a flat object)", w)];
 	}

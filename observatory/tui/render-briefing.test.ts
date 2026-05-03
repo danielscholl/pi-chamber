@@ -85,4 +85,36 @@ describe("renderBriefing", () => {
 			expect(line.length).toBeLessThanOrEqual(32);
 		}
 	});
+
+	test("routes to page renderer when sectioned data + manifest are provided", () => {
+		const manifest = { name: "Test", kind: "briefing" as const };
+		const out = renderBriefing(
+			{
+				priority: { title: "Top", body: "ship it" },
+				metrics: [{ label: "k", value: 1 }],
+			},
+			60,
+			false,
+			undefined,
+			manifest,
+		);
+		const joined = out.join("\n");
+		expect(joined).toContain("Test");
+		expect(joined).toContain("METRICS");
+		expect(joined).toContain("Top");
+	});
+
+	test("falls back to flat card grid when sectioned data has no manifest", () => {
+		const out = renderBriefing(
+			{
+				priority: { title: "Top", body: "ship it" },
+				metrics: [{ label: "k", value: 1 }],
+			},
+			60,
+		);
+		// Without a manifest the flat path runs; priority and metrics become
+		// JSON-stringified card values.
+		const joined = out.join("\n");
+		expect(joined).not.toContain("METRICS");
+	});
 });

@@ -12,9 +12,12 @@ import {
 import { listGenesisMinds } from "../../mind/core.ts";
 import { handleObservatoryInput } from "./input.ts";
 import {
+	type RoomSidebarEntry,
+	buildSidebarItems,
 	clampSidebarScroll,
 	renderSidebar,
 } from "./render-sidebar.ts";
+import { normalizeStatusBoard } from "./render-status-board.ts";
 import {
 	type DashboardActivity,
 	lensesActivitySummary,
@@ -36,6 +39,7 @@ import {
 	setEntries,
 	setLensData,
 	setNotification,
+	setSidebarItems,
 	sidebarItemCount,
 } from "./state.ts";
 import { type LensWatcher, type WatcherChange, startLensWatcher } from "./watcher.ts";
@@ -87,6 +91,7 @@ export class ObservatoryOverlay implements Component, Focusable {
 		this.lastViewportHeight = h;
 
 		const layout = computeColumnLayout(w, h);
+		this.refreshSidebarItems();
 		const sidebarItems = sidebarItemCount(this.viewState);
 		const sidebarScroll = clampSidebarScroll(
 			this.viewState.selectedSidebarIndex,
@@ -97,8 +102,8 @@ export class ObservatoryOverlay implements Component, Focusable {
 		this.viewState.sidebarScrollOffset = sidebarScroll;
 
 		const sidebarLines = renderSidebar(
-			this.viewState.entries,
-			this.viewState.selection,
+			this.viewState.sidebarItems,
+			this.viewState.selectedSidebarIndex,
 			layout.sidebarWidth,
 			layout.bodyHeight,
 			sidebarScroll,
@@ -220,6 +225,7 @@ export class ObservatoryOverlay implements Component, Focusable {
 					width,
 					this.viewState.expandValues,
 					this.widgetColorize,
+					entry.manifest,
 				),
 				subtitle,
 			};
@@ -236,6 +242,36 @@ export class ObservatoryOverlay implements Component, Focusable {
 		const result = readLensData(this.lensesRoot, manifest.id, manifest);
 		setLensData(this.viewState, manifest.id, result);
 		return result;
+	}
+
+	private refreshSidebarItems(): void {
+		const now = Date.now();
+		if (!this.cachedMinds || now - this.cachedMindsAt > 5_000) {
+			this.cachedMinds = safeListMinds(this.cwd);
+			this.cachedMindsAt = now;
+		}
+		setSidebarItems(
+			this.viewState,
+			buildSidebarItems(
+				this.viewState.entries,
+				this.cachedMinds ?? [],
+				this.collectRoomSidebarEntries(),
+			),
+		);
+	}
+
+	private collectRoomSidebarEntries(): RoomSidebarEntry[] {
+		const roomEntry = this.viewState.entries.find(
+			(e) => e.id === "room" && e.status === "ok",
+		);
+		if (!roomEntry || roomEntry.status !== "ok") return [];
+		const result = this.loadLensData(roomEntry.manifest);
+		if (!result.ok) return [];
+		return normalizeStatusBoard(result.data).map((e) => ({
+			name: e.name,
+			status: e.status,
+			tier: e.tier,
+		}));
 	}
 
 	private collectDashboardData() {

@@ -28,9 +28,13 @@ export function renderHelp(width: number): string[] {
 			'      "icon": "activity",',
 			'      "description": "..." }',
 			"",
-			"  data.json:",
-			'    briefing      → flat object: { "active_minds": 3, ... }',
-			'    status-board  → array: [{ name, status, ... }, ...]',
+			"  data.json (briefing):",
+			"    sectioned   → { priority, metrics, activity, lists,",
+			"                    narrative, details, summary, status }",
+			'    flat        → { "active_minds": 3, ... } (card grid)',
+			"",
+			"  data.json (status-board):",
+			"    array       → [{ name, status, ... }, ...]",
 		],
 	];
 	const out: string[] = [];

@@ -21,6 +21,7 @@ import {
 	parseGenesisArgs,
 	quoteYamlString,
 	resolveGenesisPaths,
+	seedSharedDoctrine,
 	slugify,
 	validateMind,
 	WORKING_MEMORY_DIR,
@@ -245,6 +246,75 @@ describe("mind structure and validation", () => {
 				missing: [],
 				invalid: [],
 			});
+		});
+	});
+});
+
+describe("seedSharedDoctrine", () => {
+	test("writes IDEA.md and OBSERVATORY.md from bundled templates when missing", () => {
+		withTempProject((cwd) => {
+			const paths = resolveGenesisPaths(cwd, "ariadne");
+			const seeded = seedSharedDoctrine(paths);
+			expect(seeded).toContain(paths.sharedIdeaPath);
+			expect(seeded).toContain(paths.sharedObservatoryPath);
+			expect(fs.existsSync(paths.sharedIdeaPath)).toBe(true);
+			expect(fs.existsSync(paths.sharedObservatoryPath)).toBe(true);
+			expect(fs.readFileSync(paths.sharedIdeaPath, "utf-8")).toContain(
+				"Shared IDEA Doctrine",
+			);
+			expect(fs.readFileSync(paths.sharedObservatoryPath, "utf-8")).toContain(
+				"Shared Observatory Doctrine",
+			);
+		});
+	});
+
+	test("does not overwrite an existing IDEA.md", () => {
+		withTempProject((cwd) => {
+			const paths = resolveGenesisPaths(cwd, "ariadne");
+			fs.mkdirSync(paths.sharedMindPath, { recursive: true });
+			fs.writeFileSync(paths.sharedIdeaPath, "# Custom user IDEA\n");
+			const seeded = seedSharedDoctrine(paths);
+			expect(seeded).not.toContain(paths.sharedIdeaPath);
+			expect(seeded).toContain(paths.sharedObservatoryPath);
+			expect(fs.readFileSync(paths.sharedIdeaPath, "utf-8")).toBe(
+				"# Custom user IDEA\n",
+			);
+		});
+	});
+
+	test("does not overwrite an existing OBSERVATORY.md", () => {
+		withTempProject((cwd) => {
+			const paths = resolveGenesisPaths(cwd, "ariadne");
+			fs.mkdirSync(paths.sharedMindPath, { recursive: true });
+			fs.writeFileSync(paths.sharedObservatoryPath, "# Custom Observatory\n");
+			const seeded = seedSharedDoctrine(paths);
+			expect(seeded).toContain(paths.sharedIdeaPath);
+			expect(seeded).not.toContain(paths.sharedObservatoryPath);
+			expect(fs.readFileSync(paths.sharedObservatoryPath, "utf-8")).toBe(
+				"# Custom Observatory\n",
+			);
+		});
+	});
+
+	test("returns an empty array when both files already exist", () => {
+		withTempProject((cwd) => {
+			const paths = resolveGenesisPaths(cwd, "ariadne");
+			fs.mkdirSync(paths.sharedMindPath, { recursive: true });
+			fs.writeFileSync(paths.sharedIdeaPath, "# A\n");
+			fs.writeFileSync(paths.sharedObservatoryPath, "# B\n");
+			expect(seedSharedDoctrine(paths)).toEqual([]);
+		});
+	});
+
+	test("creates the shared mind directory if it does not exist yet", () => {
+		withTempProject((cwd) => {
+			const paths = resolveGenesisPaths(cwd, "ariadne");
+			// Note: NOT calling createMindStructure first.
+			expect(fs.existsSync(paths.sharedMindPath)).toBe(false);
+			seedSharedDoctrine(paths);
+			expect(fs.existsSync(paths.sharedMindPath)).toBe(true);
+			expect(fs.existsSync(paths.sharedIdeaPath)).toBe(true);
+			expect(fs.existsSync(paths.sharedObservatoryPath)).toBe(true);
 		});
 	});
 });
