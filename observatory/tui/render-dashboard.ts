@@ -10,6 +10,9 @@ import {
 	statusTier,
 	tierGlyph,
 } from "./render-status-board.ts";
+import { type Colorize, noColorize } from "./widgets/types.ts";
+import { grid } from "./widgets/grid.ts";
+import { panel } from "./widgets/panel.ts";
 
 export interface DashboardActivity {
 	lensId: string;
@@ -24,18 +27,44 @@ export interface DashboardData {
 	now: number;
 }
 
-export function renderDashboard(data: DashboardData, width: number): string[] {
+export function renderDashboard(
+	data: DashboardData,
+	width: number,
+	colorize: Colorize = noColorize,
+): string[] {
 	const w = Math.max(30, width);
-	const lines: string[] = [];
-
-	lines.push(...renderPanel("Lenses", lensesPanel(data.entries), w));
-	lines.push("");
-	lines.push(...renderPanel("Room", roomPanel(data.roomData), w));
-	lines.push("");
-	lines.push(...renderPanel("Minds", mindsPanel(data.minds, w), w));
-	lines.push("");
-	lines.push(...renderPanel("Activity", activityPanel(data.activity, data.now), w));
-	return lines;
+	const cells = [
+		(colWidth: number) =>
+			panel({
+				title: "Lenses",
+				body: lensesPanel(data.entries),
+				width: colWidth,
+				colorize,
+			}),
+		(colWidth: number) =>
+			panel({
+				title: "Room",
+				body: roomPanel(data.roomData),
+				width: colWidth,
+				colorize,
+			}),
+		(colWidth: number) =>
+			panel({
+				title: "Minds",
+				// inner width = colWidth - 2 (left + right border).
+				body: mindsPanel(data.minds, Math.max(10, colWidth - 2)),
+				width: colWidth,
+				colorize,
+			}),
+		(colWidth: number) =>
+			panel({
+				title: "Activity",
+				body: activityPanel(data.activity, data.now),
+				width: colWidth,
+				colorize,
+			}),
+	];
+	return grid({ cells, width: w, minColWidth: 24, gap: 2 });
 }
 
 function lensesPanel(entries: DiscoveryEntry[]): string[] {
@@ -80,11 +109,12 @@ function roomPanel(data: unknown): string[] {
 	return lines;
 }
 
-function mindsPanel(minds: string[], width: number): string[] {
+function mindsPanel(minds: string[], innerWidth: number): string[] {
 	if (minds.length === 0) return ["(no Genesis minds in .pi/minds yet)"];
 	const joined = minds.join(" · ");
-	const inner = Math.max(10, width - 4);
-	if (joined.length <= inner) return [`${minds.length} available: ${joined}`];
+	const fullLine = `${minds.length} available: ${joined}`;
+	const inner = Math.max(10, innerWidth);
+	if (fullLine.length <= inner) return [fullLine];
 	// Wrap as a comma-separated list to fit the inner width.
 	const lines: string[] = [`${minds.length} available:`];
 	let line = "  ";
@@ -164,20 +194,4 @@ export function lensesActivitySummary(
 		}
 	}
 	return best;
-}
-
-function renderPanel(title: string, body: string[], width: number): string[] {
-	const w = Math.max(20, width);
-	const out: string[] = [];
-	out.push(truncate(`── ${title} ${"─".repeat(Math.max(0, w - title.length - 4))}`, w));
-	for (const line of body) {
-		out.push(truncate(line, w));
-	}
-	return out;
-}
-
-function truncate(text: string, width: number): string {
-	if (text.length <= width) return text;
-	if (width <= 1) return text.slice(0, width);
-	return `${text.slice(0, width - 1)}…`;
 }

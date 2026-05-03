@@ -1,8 +1,25 @@
+import { type Colorize, noColorize } from "./widgets/types.ts";
+import { card } from "./widgets/card.ts";
+import { grid } from "./widgets/grid.ts";
+import { truncateToWidth } from "./widgets/text.ts";
+
 export interface BriefingRow {
 	key: string;
 	value: string;
 	tier: "string" | "number" | "boolean" | "null" | "json";
 }
+
+// Below this width, fall back to the legacy single-line key/value layout.
+// Cards need at least ~22 visible cols to read well.
+const WIDE_THRESHOLD = 44;
+
+const TIER_EMOJI: Record<BriefingRow["tier"], string> = {
+	number: "#",
+	boolean: "✓",
+	string: "·",
+	null: "—",
+	json: "{}",
+};
 
 export function normalizeBriefing(data: unknown): BriefingRow[] {
 	if (!data || typeof data !== "object" || Array.isArray(data)) return [];
@@ -29,32 +46,64 @@ export function renderBriefing(
 	data: unknown,
 	width: number,
 	expandValues = false,
+	colorize: Colorize = noColorize,
 ): string[] {
 	const w = Math.max(20, width);
 	if (!data || typeof data !== "object" || Array.isArray(data)) {
-		return [truncate("(empty briefing — data should be a flat object)", w)];
+		return [truncateToWidth("(empty briefing — data should be a flat object)", w)];
 	}
 	const rows = normalizeBriefing(data);
 	if (!rows.length) {
-		return [truncate("(briefing has no fields yet)", w)];
+		return [truncateToWidth("(briefing has no fields yet)", w)];
 	}
 
-	const labelWidth = computeLabelWidth(rows, w);
+	if (w >= WIDE_THRESHOLD) {
+		return renderAsCards(rows, w, colorize);
+	}
+	return renderAsKvRows(rows, w, expandValues);
+}
+
+function renderAsCards(
+	rows: BriefingRow[],
+	width: number,
+	colorize: Colorize,
+): string[] {
+	const cells = rows.map((row) => (colWidth: number) =>
+		card({
+			label: row.key,
+			value: row.value,
+			width: colWidth,
+			emoji: TIER_EMOJI[row.tier],
+			emphasizeValue: row.tier === "number",
+			colorize,
+		}),
+	);
+	return grid({ cells, width, minColWidth: 22, gap: 2 });
+}
+
+// ---- legacy narrow-mode kv-row layout ----------------------------------
+
+function renderAsKvRows(
+	rows: BriefingRow[],
+	width: number,
+	expandValues: boolean,
+): string[] {
+	const labelWidth = computeLabelWidth(rows, width);
 	const gap = 2;
-	const valueWidth = Math.max(8, w - labelWidth - gap);
+	const valueWidth = Math.max(8, width - labelWidth - gap);
 
 	const lines: string[] = [];
 	for (const row of rows) {
 		const label = padRight(row.key, labelWidth);
 		const valueLines = layoutValue(row.value, valueWidth, expandValues);
 		if (valueLines.length === 0) {
-			lines.push(truncate(label, w));
+			lines.push(truncatePlain(label, width));
 			continue;
 		}
-		lines.push(truncate(`${label}${" ".repeat(gap)}${valueLines[0]}`, w));
+		lines.push(truncatePlain(`${label}${" ".repeat(gap)}${valueLines[0]}`, width));
 		for (let i = 1; i < valueLines.length; i++) {
 			const indent = " ".repeat(labelWidth + gap);
-			lines.push(truncate(`${indent}${valueLines[i]}`, w));
+			lines.push(truncatePlain(`${indent}${valueLines[i]}`, width));
 		}
 	}
 	return lines;
@@ -71,7 +120,9 @@ function padRight(text: string, width: number): string {
 	return text + " ".repeat(width - text.length);
 }
 
-function truncate(text: string, width: number): string {
+// Plain (no-ANSI) truncation so the narrow kv-row tests can keep asserting
+// `.length <= width` without false positives from ellipsis-related ANSI.
+function truncatePlain(text: string, width: number): string {
 	if (text.length <= width) return text;
 	if (width <= 1) return text.slice(0, width);
 	return `${text.slice(0, width - 1)}…`;
@@ -84,7 +135,7 @@ function layoutValue(
 ): string[] {
 	if (value === "") return [""];
 	if (!expand) {
-		return [value.length <= width ? value : truncate(value, width)];
+		return [value.length <= width ? value : truncatePlain(value, width)];
 	}
 	return wrapToWidth(value, width);
 }

@@ -121,7 +121,7 @@ async function openObservatory(ctx: ObservatoryCommandContext): Promise<void> {
 					lensesRoot,
 					() => done(undefined as never),
 				),
-			{ overlay: true },
+			{ overlay: false },
 		);
 	} catch (error) {
 		notify(

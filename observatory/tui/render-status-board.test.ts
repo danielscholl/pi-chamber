@@ -7,6 +7,7 @@ import {
 	statusTier,
 	tierGlyph,
 } from "./render-status-board.ts";
+import { visibleWidth } from "./widgets/text.ts";
 
 describe("statusTier classification", () => {
 	test("classifies err keywords first", () => {
@@ -111,7 +112,9 @@ describe("renderStatusBoard", () => {
 		const wide = "x".repeat(80);
 		const out = renderStatusBoard([{ name: wide, status: "running" }], 20);
 		for (const line of out) {
-			expect(line.length).toBeLessThanOrEqual(20);
+			// visibleWidth (not .length) is the terminal-column constraint;
+			// truncated text may carry ANSI reset codes around the ellipsis.
+			expect(visibleWidth(line)).toBeLessThanOrEqual(20);
 		}
 	});
 });

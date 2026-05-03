@@ -5,6 +5,7 @@ import {
 	computeColumnLayout,
 	renderObservatoryFrame,
 } from "./render-layout.ts";
+import { visibleWidth } from "./widgets/text.ts";
 
 describe("computeColumnLayout", () => {
 	test("clamps to a minimum sidebar width", () => {
@@ -70,7 +71,8 @@ describe("renderObservatoryFrame", () => {
 			height: 8,
 		});
 		for (const line of out) {
-			expect(line.length).toBeLessThanOrEqual(50);
+			// visibleWidth is the terminal-column constraint; truncation may add ANSI.
+			expect(visibleWidth(line)).toBeLessThanOrEqual(50);
 		}
 	});
 });

@@ -1,3 +1,5 @@
+import { padToWidth, truncateToWidth, visibleWidth } from "./widgets/text.ts";
+
 export interface ObservatoryFrameInput {
 	title: string;
 	subtitle?: string;
@@ -74,20 +76,14 @@ function padColumn(lines: string[], width: number, height: number): string[] {
 	const out: string[] = [];
 	for (let i = 0; i < height; i++) {
 		const raw = lines[i] ?? "";
-		out.push(padRight(truncate(raw, width), width));
+		out.push(padToWidth(truncate(raw, width), width));
 	}
 	return out;
 }
 
-function padRight(text: string, width: number): string {
-	if (text.length >= width) return text;
-	return text + " ".repeat(width - text.length);
-}
-
 function truncate(text: string, width: number): string {
-	if (text.length <= width) return text;
-	if (width <= 1) return text.slice(0, width);
-	return `${text.slice(0, width - 1)}…`;
+	if (visibleWidth(text) <= width) return text;
+	return truncateToWidth(text, width);
 }
 
 function repeat(ch: string, n: number): string {

@@ -39,6 +39,7 @@ import {
 	sidebarItemCount,
 } from "./state.ts";
 import { type LensWatcher, type WatcherChange, startLensWatcher } from "./watcher.ts";
+import type { Colorize, ThemeColorKey } from "./widgets/types.ts";
 
 const FOOTER_LIST = "j/k navigate · enter view · r refresh · ? help · q quit";
 const FOOTER_DETAIL = "j/k scroll · gg/G top/bottom · e expand · esc back · q quit";
@@ -60,6 +61,7 @@ export class ObservatoryOverlay implements Component, Focusable {
 	private cachedMinds: string[] | null = null;
 	private cachedMindsAt = 0;
 	private notificationFlushTimer: ReturnType<typeof setTimeout> | null = null;
+	private widgetColorize: Colorize;
 
 	constructor(
 		private tui: TUI,
@@ -69,6 +71,7 @@ export class ObservatoryOverlay implements Component, Focusable {
 		private done: () => void,
 	) {
 		this.viewState = createObservatoryViewState(this.safeDiscover());
+		this.widgetColorize = this.buildWidgetColorize();
 		this.attachWatcher();
 	}
 
@@ -99,6 +102,7 @@ export class ObservatoryOverlay implements Component, Focusable {
 			layout.sidebarWidth,
 			layout.bodyHeight,
 			sidebarScroll,
+			this.widgetColorize,
 		);
 
 		const { bodyLines, subtitle } = this.composeBody(layout.bodyWidth);
@@ -164,7 +168,11 @@ export class ObservatoryOverlay implements Component, Focusable {
 		}
 		if (this.viewState.selection.kind === "dashboard") {
 			return {
-				bodyLines: renderDashboard(this.collectDashboardData(), width),
+				bodyLines: renderDashboard(
+					this.collectDashboardData(),
+					width,
+					this.widgetColorize,
+				),
 				subtitle: "Dashboard",
 			};
 		}
@@ -207,12 +215,17 @@ export class ObservatoryOverlay implements Component, Focusable {
 		}
 		if (entry.manifest.kind === "briefing") {
 			return {
-				bodyLines: renderBriefing(data.data, width, this.viewState.expandValues),
+				bodyLines: renderBriefing(
+					data.data,
+					width,
+					this.viewState.expandValues,
+					this.widgetColorize,
+				),
 				subtitle,
 			};
 		}
 		return {
-			bodyLines: renderStatusBoard(data.data, width),
+			bodyLines: renderStatusBoard(data.data, width, this.widgetColorize),
 			subtitle,
 		};
 	}
@@ -324,6 +337,60 @@ export class ObservatoryOverlay implements Component, Focusable {
 		} catch {
 			return text;
 		}
+	}
+
+	private buildWidgetColorize(): Colorize {
+		const themeFg = (key: string, text: string): string => {
+			try {
+				// biome-ignore lint/suspicious/noExplicitAny: pi-tui ThemeColor union is wider than our key set; narrowing is the adapter's job.
+				return this.theme.fg(key as any, text);
+			} catch {
+				return text;
+			}
+		};
+		const themeBg = (key: string, text: string): string => {
+			try {
+				// biome-ignore lint/suspicious/noExplicitAny: pi-tui ThemeBg union is internal; the adapter narrows to known keys.
+				return this.theme.bg(key as any, text);
+			} catch {
+				return text;
+			}
+		};
+		const themeBold = (text: string): string => {
+			try {
+				return this.theme.bold(text);
+			} catch {
+				return text;
+			}
+		};
+		return (key: ThemeColorKey, text: string) => {
+			switch (key) {
+				case "border":
+					return themeFg("border", text);
+				case "borderAccent":
+					return themeFg("borderAccent", text);
+				case "borderMuted":
+					return themeFg("borderMuted", text);
+				case "accent":
+					return themeFg("accent", text);
+				case "muted":
+					return themeFg("muted", text);
+				case "dim":
+					return themeFg("dim", text);
+				case "success":
+					return themeFg("success", text);
+				case "warn":
+					return themeFg("warning", text);
+				case "error":
+					return themeFg("error", text);
+				case "selectedBg":
+					return themeBg("selectedBg", text);
+				case "bold":
+					return themeBold(text);
+				default:
+					return text;
+			}
+		};
 	}
 }
 

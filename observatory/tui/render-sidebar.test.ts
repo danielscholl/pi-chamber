@@ -7,6 +7,7 @@ import {
 	clampSidebarScroll,
 	renderSidebar,
 } from "./render-sidebar.ts";
+import { visibleWidth } from "./widgets/text.ts";
 
 function ok(id: string, kind: "briefing" | "status-board" = "briefing"): DiscoveryEntry {
 	return { id, status: "ok", manifest: { id, name: id, kind, source: "data.json" } };
@@ -54,7 +55,8 @@ describe("renderSidebar", () => {
 	test("each visible row is bounded by width", () => {
 		const lines = renderSidebar([ok("ops")], { kind: "dashboard" }, 12, 3, 0);
 		for (const line of lines) {
-			expect(line.length).toBeLessThanOrEqual(12);
+			// visibleWidth is the terminal-column constraint; truncation may add ANSI.
+			expect(visibleWidth(line)).toBeLessThanOrEqual(12);
 		}
 	});
 });

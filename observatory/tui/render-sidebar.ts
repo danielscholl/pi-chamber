@@ -1,5 +1,7 @@
 import type { DiscoveryEntry } from "../core.ts";
 import type { ObservatorySelection } from "./state.ts";
+import { type Colorize, noColorize } from "./widgets/types.ts";
+import { truncateToWidth } from "./widgets/text.ts";
 
 export interface SidebarItem {
 	kind: "dashboard" | "lens-ok" | "lens-invalid";
@@ -45,6 +47,7 @@ export function renderSidebar(
 	width: number,
 	height: number,
 	scrollOffset: number,
+	colorize: Colorize = noColorize,
 ): string[] {
 	const w = Math.max(8, width);
 	const items = buildSidebarItems(entries);
@@ -54,10 +57,14 @@ export function renderSidebar(
 	for (let i = 0; i < visible.length; i++) {
 		const idx = i + scrollOffset;
 		const item = visible[i];
-		const cursor = idx === selectedIndex ? "▶" : " ";
+		const isSelected = idx === selectedIndex;
+		const cursor = isSelected ? "▶" : " ";
 		const glyph = item.kind === "lens-invalid" ? "⚠" : item.kind === "dashboard" ? "·" : "✓";
 		const label = `${cursor} ${glyph} ${item.label}`;
-		lines.push(truncate(label, w));
+		const truncated = truncate(label, w);
+		// Inverse-highlight the selected row when a real colorize is provided.
+		// The ▶ cursor is preserved either way so existing tests remain valid.
+		lines.push(isSelected ? colorize("selectedBg", truncated) : truncated);
 	}
 	while (lines.length < height) lines.push("".padEnd(w));
 	return lines;
@@ -97,7 +104,5 @@ function indexOfSelection(
 }
 
 function truncate(text: string, width: number): string {
-	if (text.length <= width) return text;
-	if (width <= 1) return text.slice(0, width);
-	return `${text.slice(0, width - 1)}…`;
+	return truncateToWidth(text, width);
 }

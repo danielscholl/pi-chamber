@@ -208,14 +208,14 @@ describe("observatory extension", () => {
 		});
 	});
 
-	test("default invocation mounts the TUI overlay", async () => {
+	test("default invocation mounts the TUI fullscreen", async () => {
 		const { commands } = createHarness();
 		const cmd = commands.get("observatory");
 		await withTempProject(async (cwd) => {
 			const ctx = createContext(cwd);
 			await cmd?.handler("", ctx);
 			expect(ctx.customCalls).toHaveLength(1);
-			expect(ctx.customCalls[0].options).toEqual({ overlay: true });
+			expect(ctx.customCalls[0].options).toEqual({ overlay: false });
 			expect(ctx.customCalls[0].disposed).toBe(true);
 			expect(
 				ctx.notifications.some((n) => n.type === "error"),

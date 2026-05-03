@@ -16,6 +16,7 @@ import {
 	lensesActivitySummary,
 	renderDashboard,
 } from "./render-dashboard.ts";
+import { visibleWidth } from "./widgets/text.ts";
 
 function entry(id: string, kind: "briefing" | "status-board" = "briefing"): DiscoveryEntry {
 	return {
@@ -145,7 +146,9 @@ describe("renderDashboard", () => {
 			32,
 		);
 		for (const line of out) {
-			expect(line.length).toBeLessThanOrEqual(32);
+			// visibleWidth (not .length) is the terminal-column constraint;
+			// truncated body text may carry ANSI reset codes around the ellipsis.
+			expect(visibleWidth(line)).toBeLessThanOrEqual(32);
 		}
 	});
 });
