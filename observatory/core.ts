@@ -18,24 +18,16 @@ import {
 export const ALLOWED_LENS_KINDS = ["briefing", "status-board"] as const;
 export type LensKind = (typeof ALLOWED_LENS_KINDS)[number];
 
-export const DEFAULT_OBSERVATORY_HOST = "127.0.0.1";
-export const DEFAULT_OBSERVATORY_PORT = 7878;
 export const LENS_MANIFEST_FILE = "lens.json";
 
 const SLUG_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 
 export interface ObservatoryConfig {
 	lensesPath: string;
-	port: number;
-	host: string;
-	openOnStart: boolean;
 }
 
 export const DEFAULT_OBSERVATORY_CONFIG: ObservatoryConfig = {
 	lensesPath: "./.pi/observatory/lenses",
-	port: DEFAULT_OBSERVATORY_PORT,
-	host: DEFAULT_OBSERVATORY_HOST,
-	openOnStart: false,
 };
 
 export interface LensManifest {
@@ -88,29 +80,8 @@ export function loadObservatoryConfig(cwd: string): ObservatoryConfig {
 	if (typeof observatory.lensesPath === "string") {
 		config.lensesPath = observatory.lensesPath;
 	}
-	if (typeof observatory.port === "number" && Number.isInteger(observatory.port)) {
-		if (observatory.port < 0 || observatory.port > 65535) {
-			throw new Error(
-				`Observatory port must be between 0 and 65535 (got ${observatory.port}).`,
-			);
-		}
-		config.port = observatory.port;
-	} else if (observatory.port !== undefined) {
-		throw new Error(
-			`Observatory port must be an integer (got ${typeof observatory.port}).`,
-		);
-	}
-	if (typeof observatory.host === "string") {
-		if (observatory.host !== DEFAULT_OBSERVATORY_HOST) {
-			throw new Error(
-				`Observatory host must be ${DEFAULT_OBSERVATORY_HOST} (got ${observatory.host}). The framework binds localhost only.`,
-			);
-		}
-		config.host = observatory.host;
-	}
-	if (typeof observatory.openOnStart === "boolean") {
-		config.openOnStart = observatory.openOnStart;
-	}
+	// Legacy fields (port, host, openOnStart) from the HTTP-server era are
+	// silently ignored. The TUI rework removed the server.
 
 	return config;
 }
@@ -336,6 +307,43 @@ export function resolveDataFilePath(
 	}
 
 	return finalPath;
+}
+
+export type LensDataResult =
+	| { ok: true; data: unknown }
+	| { ok: false; reason: string };
+
+export function readLensData(
+	lensesRoot: string,
+	id: string,
+	manifest: Pick<LensManifest, "source">,
+): LensDataResult {
+	let dataPath: string;
+	try {
+		dataPath = resolveDataFilePath(lensesRoot, id, manifest.source);
+	} catch (error) {
+		return { ok: false, reason: errorMessage(error) };
+	}
+	if (!existsSync(dataPath)) {
+		return { ok: false, reason: `data file is missing: ${manifest.source}` };
+	}
+	let raw: string;
+	try {
+		raw = readFileSync(dataPath, "utf-8");
+	} catch (error) {
+		return {
+			ok: false,
+			reason: `cannot read data file: ${errorMessage(error)}`,
+		};
+	}
+	try {
+		return { ok: true, data: JSON.parse(raw) };
+	} catch (error) {
+		return {
+			ok: false,
+			reason: `data file is not valid JSON: ${errorMessage(error)}`,
+		};
+	}
 }
 
 function errorMessage(error: unknown): string {
