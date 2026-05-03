@@ -1,10 +1,5 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import {
-	appendRoomTranscriptTurn,
-	buildRoomHistoryFromEntries,
-	DEFAULT_GROUP_CHAT_MAX_TURNS,
-	DEFAULT_GROUP_CHAT_MIN_ROUNDS,
-	DEFAULT_GROUP_CHAT_REPEAT_CAP,
 	DEFAULT_ROOM_MODE,
 	deleteSavedRoom,
 	describeRoomState,
@@ -13,14 +8,11 @@ import {
 	listSavedRooms,
 	normalizeRoomSlug,
 	parseRoomArgs,
-	resolveRoomSessionPath,
 	ROOM_MODES,
 	ROOM_STATE_CUSTOM_TYPE,
 	type RoomCommand,
 	type RoomMode,
 	type RoomState,
-	type RoomTranscriptTurnV2,
-	readRoomTranscript,
 	readSavedRoom,
 	resolveRoomParticipants,
 	safeReadSavedRoom,
@@ -29,46 +21,20 @@ import {
 	validateRoomState,
 	writeSavedRoom,
 } from "./core.ts";
-import {
-	buildMindModeSystemPrompt,
-	listGenesisMinds,
-	loadMindConfig,
-	loadMindContext,
-} from "../mind/core.ts";
+import { listGenesisMinds } from "../mind/core.ts";
 import { registerExitCommand, registerExitTarget } from "../shared/session-exit.ts";
-import {
-	buildChairmanPersona,
-	CHAIRMAN_SLUG,
-	type ChamberHistoryTurn,
-	type ModeratorPhase,
-} from "./prompts.ts";
-import {
-	type DirectorOverrides,
-	executeStrategy,
-	type GroupChatConfig,
-	type MindSpec,
-	type OrchestrationContext,
-	type SpeechRole,
-	type SpawnFn,
-} from "./strategies.ts";
-import {
-	spawnMind,
-	type SpawnMindResult,
-} from "./spawn.ts";
+import { CHAIRMAN_SLUG } from "./prompts.ts";
 import {
 	ROOM_CUSTOM_TYPES,
 	type RoomStateView,
 	formatDurationMs,
 	mindSpeechRenderer,
-	type MindSpeechDetails,
 	moderatorDecisionRenderer,
-	type ModeratorDecisionDetails,
 	type ParticipantStateView,
 	type ParticipantStatus,
 	paletteIndexForSlug,
 	renderParticipantBarLines,
 	roundMetricsRenderer,
-	type RoundMetricsDetails,
 	userRoomMessageRenderer,
 } from "./ui.ts";
 import {
@@ -78,68 +44,20 @@ import {
 	paletteNameForIndex,
 	writeChamberObservatoryLens,
 } from "./observatory.ts";
-
-type RoomSessionManager = {
-	getEntries(): Array<Record<string, unknown>>;
-	getSessionFile?(): string | undefined;
-	appendCustomEntry?(customType: string, data?: unknown): string;
-	appendSessionInfo?(name: string): string;
-};
-
-type RoomCommandContext = {
-	cwd: string;
-	hasUI: boolean;
-	sessionManager: RoomSessionManager;
-	signal?: AbortSignal;
-	abort?: () => void;
-	waitForIdle?(): Promise<void>;
-	newSession?(options?: {
-		parentSession?: string;
-		setup?: (sessionManager: RoomSessionManager) => Promise<void> | void;
-		withSession?: (ctx: RoomCommandContext) => Promise<void> | void;
-	}): Promise<{ cancelled?: boolean }>;
-	switchSession?(
-		sessionPath: string,
-		options?: {
-			withSession?: (ctx: RoomCommandContext) => Promise<void> | void;
-		},
-	): Promise<{ cancelled?: boolean }>;
-	ui: {
-		notify(message: string, type?: "info" | "warning" | "error"): void;
-		select?(prompt: string, options: string[]): Promise<string | undefined>;
-		input?(prompt: string, defaultValue?: string): Promise<string | undefined>;
-		setStatus(key: string, value: string | undefined): void;
-		setWidget?: ExtensionAPI extends { on: unknown }
-			?
-					| ((
-							key: string,
-							content: string[] | undefined,
-							options?: { placement?: "aboveEditor" | "belowEditor" },
-					  ) => void)
-					| ((
-							key: string,
-							factory: unknown,
-							options?: { placement?: "aboveEditor" | "belowEditor" },
-					  ) => void)
-			: never;
-		setWorkingIndicator?: (options?: {
-			frames?: string[];
-			intervalMs?: number;
-		}) => void;
-	};
-};
+import type {
+	ParticipantTracker,
+	RoomCommandContext,
+	RoomSessionManager,
+} from "./types.ts";
+import {
+	createTurnOrchestrator,
+	type TurnOrchestrator,
+} from "./turn-orchestration.ts";
 
 type AutocompleteItem = {
 	value: string;
 	label: string;
 	description?: string;
-};
-
-type ParticipantTracker = {
-	slug: string;
-	role: "speaker" | "moderator";
-	status: ParticipantStatus;
-	paletteIndex: number;
 };
 
 const STATE_STREAM = ROOM_STATE_CUSTOM_TYPE;
@@ -151,22 +69,8 @@ const SPINNER_FRAMES = ["·", "•", "●", "•"];
 export default function (pi: ExtensionAPI) {
 	let activeRoom: RoomState | undefined;
 	let lastInactiveRoom: RoomState | undefined;
-	let activeDiskTranscript: RoomTranscriptTurnV2[] = [];
-	let persistedRoundCount = 0;
 	let participantTrackers: ParticipantTracker[] = [];
-	let mindSpecCache = new Map<string, MindSpec>();
-	let cachedMindCwd: string | undefined;
-	let activeAbort: AbortController | undefined;
-	let roundStartedAt = 0;
 	let statusInterval: ReturnType<typeof setInterval> | undefined;
-	let speechBuffers = new Map<string, { slug: string; text: string }>();
-	let messageCounter = 0;
-	let pendingDirectorOverrides: DirectorOverrides = {};
-	let lastReplyBySlug = new Map<string, string>();
-	let turnCountBySlug = new Map<string, number>();
-	let lastRoomMetrics:
-		| { mode: string; turns: number; durationMs: number }
-		| undefined;
 	let activeRoomStartedAt: string | undefined;
 
 	pi.registerMessageRenderer(
@@ -193,29 +97,6 @@ export default function (pi: ExtensionAPI) {
 		(message, options, theme: any) =>
 			roundMetricsRenderer(message as never, options, theme),
 	);
-
-	function nextMessageId(): string {
-		messageCounter += 1;
-		return `room-msg-${messageCounter}-${Date.now()}`;
-	}
-
-	function resetTranscriptState(): void {
-		activeDiskTranscript = [];
-		persistedRoundCount = 0;
-	}
-
-	function loadTranscriptForActive(cwd: string): void {
-		if (!activeRoom?.active || !activeRoom.slug) {
-			resetTranscriptState();
-			return;
-		}
-		try {
-			activeDiskTranscript = readRoomTranscript(cwd, activeRoom.slug);
-		} catch {
-			activeDiskTranscript = [];
-		}
-		persistedRoundCount = 0;
-	}
 
 	function persistState(entry: RoomState): void {
 		try {
@@ -350,13 +231,14 @@ export default function (pi: ExtensionAPI) {
 				participants: [],
 			};
 		}
+		const stats = orchestrator.getRuntimeStats();
 		const participants: ObservatoryParticipant[] = participantTrackers.map((p) => ({
 			name: p.slug,
 			status: p.status,
 			role: p.role,
 			color: paletteNameForIndex(p.paletteIndex),
-			turns: turnCountBySlug.get(p.slug) ?? 0,
-			lastReply: lastReplyBySlug.get(p.slug),
+			turns: stats.turnCountBySlug.get(p.slug) ?? 0,
+			lastReply: stats.lastReplyBySlug.get(p.slug),
 		}));
 		return {
 			active: true,
@@ -365,7 +247,7 @@ export default function (pi: ExtensionAPI) {
 			startedAt: activeRoomStartedAt,
 			updatedAt,
 			participants,
-			lastMetrics: lastRoomMetrics,
+			lastMetrics: stats.lastRoomMetrics,
 		};
 	}
 
@@ -375,12 +257,6 @@ export default function (pi: ExtensionAPI) {
 		} catch {
 			// Observatory lens is best-effort. Failures must not block the room turn.
 		}
-	}
-
-	function resetObservatoryCounters(): void {
-		lastReplyBySlug = new Map();
-		turnCountBySlug = new Map();
-		lastRoomMetrics = undefined;
 	}
 
 	function setWorkingIndicator(
@@ -406,6 +282,7 @@ export default function (pi: ExtensionAPI) {
 
 	function startStatusTicker(
 		ctx: Pick<RoomCommandContext, "hasUI" | "ui">,
+		getRoundStartedAt: () => number,
 	): void {
 		stopStatusTicker();
 		if (!ctx.hasUI) return;
@@ -414,7 +291,7 @@ export default function (pi: ExtensionAPI) {
 			const speakers = participantTrackers.filter(
 				(p) => p.status === "speaking" || p.status === "thinking",
 			);
-			const elapsed = formatDurationMs(Date.now() - roundStartedAt);
+			const elapsed = formatDurationMs(Date.now() - getRoundStartedAt());
 			let detail = `${speakers.length} active`;
 			if (speakers.length === 1) detail = speakers[0].slug;
 			setRoomStatus(ctx, activeRoom, `${detail} · ${elapsed}`);
@@ -432,490 +309,23 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	function ensureMindSpec(
-		cwd: string,
-		slug: string,
-	): MindSpec {
-		if (cachedMindCwd !== cwd) {
-			mindSpecCache.clear();
-			cachedMindCwd = cwd;
-		}
-		const cached = mindSpecCache.get(slug);
-		if (cached) return cached;
-		if (slug === CHAIRMAN_SLUG) {
-			const spec: MindSpec = {
-				slug: CHAIRMAN_SLUG,
-				persona: buildChairmanPersona(),
-				paletteIndex: paletteIndexForSlug(CHAIRMAN_SLUG),
-			};
-			mindSpecCache.set(slug, spec);
-			return spec;
-		}
-		const ctx = loadMindContext(cwd, slug);
-		const persona = buildMindModeSystemPrompt(ctx);
-		const config = loadMindConfig(cwd, slug);
-		const spec: MindSpec = {
-			slug,
-			persona,
-			paletteIndex: paletteIndexForSlug(slug),
-			model: config?.model,
-			fallbackModels: config?.fallbackModels,
-			tools: config?.tools,
-		};
-		mindSpecCache.set(slug, spec);
-		return spec;
-	}
-
-	function buildMindsBySlug(
-		cwd: string,
-		slugs: string[],
-		options: { includeChairman?: boolean } = {},
-	): Map<string, MindSpec> {
-		const map = new Map<string, MindSpec>();
-		for (const slug of slugs) {
-			map.set(slug, ensureMindSpec(cwd, slug));
-		}
-		if (options.includeChairman) {
-			map.set(CHAIRMAN_SLUG, ensureMindSpec(cwd, CHAIRMAN_SLUG));
-		}
-		return map;
-	}
-
-	function buildPriorRoundsHistory(
-		ctx: Pick<RoomCommandContext, "sessionManager">,
-		maxRounds = 2,
-	): ChamberHistoryTurn[] {
-		const sessionRounds = buildRoomHistoryFromEntries(
-			ctx.sessionManager.getEntries(),
-			maxRounds,
-		);
-		const need = Math.max(0, maxRounds - sessionRounds.length);
-		const diskPicked = need > 0 ? activeDiskTranscript.slice(-need) : [];
-		const turns: ChamberHistoryTurn[] = [];
-		// Disk-sourced rounds first (older), then session-sourced (more recent).
-		// Disk turns expose per-speaker fidelity; session turns are flat blobs
-		// because Pi session entries don't carry per-speaker attribution.
-		for (const dt of diskPicked) {
-			turns.push({ speaker: "user", content: dt.user });
-			for (const inner of dt.turns) {
-				turns.push({
-					speaker: inner.speaker,
-					content: inner.content,
-					turnNumber: inner.turnNumber,
-					isModerator: inner.role === "synthesis",
-				});
-			}
-		}
-		for (const sr of sessionRounds) {
-			turns.push({ speaker: "user", content: sr.user });
-			turns.push({ speaker: "room", content: sr.assistant });
-		}
-		return turns;
-	}
-
-	function persistRoundToDisk(
-		ctx: RoomCommandContext,
-		userMessage: string,
-		mode: RoomMode | string,
-		transcript: ChamberHistoryTurn[],
-		startedAt: number,
-	): void {
-		if (!activeRoom?.active || !activeRoom.slug) return;
-		const ts = new Date().toISOString();
-		const turn: RoomTranscriptTurnV2 = {
-			version: 2,
-			user: userMessage,
-			mode,
-			durationMs: Date.now() - startedAt,
-			ts,
-			turns: transcript.map((t) => ({
-				speaker: t.speaker,
-				role: t.isModerator ? "synthesis" : "speaker",
-				content: t.content,
-				...(typeof t.turnNumber === "number"
-					? { turnNumber: t.turnNumber }
-					: {}),
-				paletteIndex: paletteIndexForSlug(t.speaker),
-			})),
-		};
-		try {
-			appendRoomTranscriptTurn(ctx.cwd, activeRoom.slug, turn);
-			activeDiskTranscript.push(turn);
-			persistedRoundCount += 1;
-		} catch {
-			// Persistence failures must not block the turn.
-		}
-	}
-
-	function emitMindSpeechMessage(
-		details: MindSpeechDetails,
-		text: string,
-		messageId: string,
-	): void {
-		try {
-			pi.sendMessage<MindSpeechDetails>({
-				customType: ROOM_CUSTOM_TYPES.mindSpeech,
-				content: text,
-				display: true,
-				details: { ...details, messageId } as MindSpeechDetails & {
-					messageId: string;
-				},
-			});
-		} catch {
-			// session may have ended
-		}
-	}
-
-	function emitModeratorDecisionMessage(
-		details: ModeratorDecisionDetails,
-		summary: string,
-	): void {
-		try {
-			pi.sendMessage<ModeratorDecisionDetails>({
-				customType: ROOM_CUSTOM_TYPES.moderatorDecision,
-				content: summary,
-				display: true,
-				details,
-			});
-		} catch {
-			// session may have ended
-		}
-	}
-
-	function emitRoundMetricsMessage(details: RoundMetricsDetails): void {
-		try {
-			pi.sendMessage<RoundMetricsDetails>({
-				customType: ROOM_CUSTOM_TYPES.roundMetrics,
-				content: `room round · ${details.turns} turns · ${formatDurationMs(details.durationMs)}`,
-				display: true,
-				details,
-			});
-		} catch {
-			// session may have ended
-		}
-	}
-
-	function emitUserRoomMessage(text: string): void {
-		try {
-			pi.sendMessage({
-				customType: ROOM_CUSTOM_TYPES.userMessage,
-				content: text,
-				display: true,
-			});
-		} catch {
-			// session may have ended
-		}
-	}
-
-	function setParticipantStatus(
-		slug: string,
-		status: ParticipantStatus,
-		ctx: Pick<RoomCommandContext, "hasUI" | "ui">,
-	): void {
-		const tracker = participantTrackers.find((p) => p.slug === slug);
-		if (tracker) tracker.status = status;
-		syncParticipantWidget(ctx);
-	}
-
-	function buildOrchestrationContext(
-		ctx: RoomCommandContext,
-		signal: AbortSignal,
-		mode: RoomMode,
-		options: { forkPerMindRoomSlug?: string } = {},
-	): OrchestrationContext {
-		const speechBuffersLocal = speechBuffers;
-		const forkRoomSlug = options.forkPerMindRoomSlug;
-		const spawn: SpawnFn = (req) =>
-			spawnMind({
-				slug: req.slug,
-				persona: req.persona,
-				prompt: req.prompt,
-				cwd: req.cwd,
-				model: req.model,
-				fallbackModels: req.fallbackModels,
-				tools: req.tools,
-				// Chairman is the built-in stateless moderator; persisting its
-				// session would let routing/synthesis decisions accumulate
-				// hidden context across turns. Always cold-spawn it.
-				sessionFile:
-					forkRoomSlug && req.slug !== CHAIRMAN_SLUG
-						? resolveRoomSessionPath(req.cwd, forkRoomSlug, req.slug)
-						: undefined,
-				signal: req.signal,
-				onDelta: req.onDelta,
-				onAttemptStart: req.onAttemptStart,
-				noChildExtensions: true,
-			});
-
-		return {
-			cwd: ctx.cwd,
-			signal,
-			spawn,
-			emitMindStart: (slug, _role, _turnNumber) => {
-				const messageId = nextMessageId();
-				speechBuffersLocal.set(messageId, { slug, text: "" });
-				setParticipantStatus(slug, "speaking", ctx);
-				syncObservatoryLens(ctx.cwd);
-				return messageId;
-			},
-			emitMindDelta: (messageId, _slug, delta) => {
-				const buf = speechBuffersLocal.get(messageId);
-				if (buf) buf.text += delta;
-			},
-			emitMindReset: (messageId, _slug) => {
-				// Wipe accumulated deltas so a fallback retry's stream is rendered
-				// cleanly and the emitMindEnd buffer-fallback never surfaces a
-				// concatenation of text from multiple model attempts.
-				const buf = speechBuffersLocal.get(messageId);
-				if (buf) buf.text = "";
-			},
-			emitMindEnd: (
-				messageId,
-				slug,
-				role,
-				result: SpawnMindResult,
-				turnNumber,
-			) => {
-				const buf = speechBuffersLocal.get(messageId);
-				const finalText = result.finalText || (buf?.text ?? "");
-				const details: MindSpeechDetails = {
-					slug,
-					mode,
-					role,
-					paletteIndex: paletteIndexForSlug(slug),
-					turnNumber,
-					durationMs: result.durationMs,
-					usage: {
-						input: result.usage.input,
-						output: result.usage.output,
-						cost: result.usage.cost,
-						turns: result.usage.turns,
-					},
-					model: result.model,
-					aborted: result.aborted,
-					stopReason: result.stopReason,
-				};
-				emitMindSpeechMessage(details, finalText, messageId);
-				speechBuffersLocal.delete(messageId);
-				setParticipantStatus(slug, result.aborted ? "aborted" : "done", ctx);
-				if (finalText.trim().length > 0) {
-					lastReplyBySlug.set(slug, finalText);
-				}
-				turnCountBySlug.set(slug, (turnCountBySlug.get(slug) ?? 0) + 1);
-				syncObservatoryLens(ctx.cwd);
-			},
-			emitModeratorDecision: (moderatorSlug, decision) => {
-				emitModeratorDecisionMessage(
-					{
-						moderatorSlug,
-						moderatorPaletteIndex: paletteIndexForSlug(moderatorSlug),
-						action: decision.action,
-						phase: decision.phase as ModeratorPhase | undefined,
-						nextSpeaker: decision.nextSpeaker,
-						direction: decision.direction,
-					},
-					decision.action === "close"
-						? `${moderatorSlug} closed the discussion`
-						: `${moderatorSlug} → ${decision.nextSpeaker || "?"}`,
-				);
-			},
-			emitRoundMetrics: (metrics) => {
-				emitRoundMetricsMessage(metrics);
-				lastRoomMetrics = {
-					mode: metrics.mode,
-					turns: metrics.turns,
-					durationMs: metrics.durationMs,
-				};
-				syncObservatoryLens(ctx.cwd);
-			},
-			consumeDirectorOverrides: () => {
-				if (
-					!pendingDirectorOverrides.nextSpeaker &&
-					!pendingDirectorOverrides.directionInjection
-				) {
-					return undefined;
-				}
-				const consumed: DirectorOverrides = { ...pendingDirectorOverrides };
-				pendingDirectorOverrides = {};
-				return consumed;
-			},
-			notifyWarning: (message) => {
-				notify(ctx, message, "warning");
-			},
-		};
-	}
-
-	async function handleRoomTurn(
-		ctx: RoomCommandContext,
-		userMessage: string,
-		options: { directAddress?: string } = {},
-	): Promise<void> {
-		if (!activeRoom?.active) return;
-		if (activeAbort) {
-			activeAbort.abort();
-		}
-		activeAbort = new AbortController();
-		roundStartedAt = Date.now();
-		speechBuffers = new Map();
-
-		const effectiveMode: RoomMode = options.directAddress
-			? "concurrent"
-			: (activeRoom.mode as RoomMode);
-		const effectiveParticipants = options.directAddress
-			? [options.directAddress]
-			: activeRoom.participants;
-		const savedRoomCfg = activeRoom.slug
-			? safeReadSavedRoom(ctx.cwd, activeRoom.slug)
-			: undefined;
-		let effectiveModerator: string | undefined =
-			!options.directAddress && effectiveMode === "group-chat"
-				? savedRoomCfg?.synthesizer ?? CHAIRMAN_SLUG
-				: undefined;
-
-		participantTrackers = buildParticipantTrackers(ctx.cwd, activeRoom);
-		for (const t of participantTrackers) {
-			t.status = effectiveParticipants.includes(t.slug) ? "thinking" : "ready";
-		}
-		syncParticipantWidget(ctx);
-
-		emitUserRoomMessage(userMessage);
-
-		setWorkingIndicator(ctx, true);
-		startStatusTicker(ctx);
-
-		try {
-			// Resolve concurrent-mode synthesizer (PR 5). false/undefined → off;
-			// true or "chairman" → chairman; any other string → participant slug.
-			// Direct-address turns (`@slug`) bypass orchestration entirely, so
-			// suppress synthesis even though `effectiveMode` is forced to
-			// "concurrent" for the spawn.
-			const concurrentSynth = savedRoomCfg?.concurrentSynthesis;
-			let concurrentSynthSlug: string | undefined =
-				!options.directAddress &&
-				effectiveMode === "concurrent" &&
-				concurrentSynth
-					? concurrentSynth === true || concurrentSynth === "chairman"
-						? CHAIRMAN_SLUG
-						: concurrentSynth
-					: undefined;
-
-			const includeChairman =
-				(effectiveMode === "group-chat" &&
-					effectiveModerator === CHAIRMAN_SLUG) ||
-				concurrentSynthSlug === CHAIRMAN_SLUG;
-			const minds = buildMindsBySlug(ctx.cwd, effectiveParticipants, {
-				includeChairman,
-			});
-			if (
-				effectiveMode === "group-chat" &&
-				effectiveModerator &&
-				effectiveModerator !== CHAIRMAN_SLUG &&
-				!minds.has(effectiveModerator)
-			) {
-				// Synthesizer is a hand-edited slug from room.json that may have
-				// been deleted or never existed. On load failure, warn once and
-				// fall back to the built-in chairman so the round still runs.
-				try {
-					minds.set(
-						effectiveModerator,
-						ensureMindSpec(ctx.cwd, effectiveModerator),
-					);
-				} catch (err) {
-					notify(
-						ctx,
-						`Saved-room synthesizer "${effectiveModerator}" is not loadable (${errorMessage(err)}). Falling back to chairman.`,
-						"warning",
-					);
-					effectiveModerator = CHAIRMAN_SLUG;
-					if (!minds.has(CHAIRMAN_SLUG)) {
-						minds.set(CHAIRMAN_SLUG, ensureMindSpec(ctx.cwd, CHAIRMAN_SLUG));
-					}
-				}
-			}
-			if (
-				concurrentSynthSlug &&
-				concurrentSynthSlug !== CHAIRMAN_SLUG &&
-				!minds.has(concurrentSynthSlug)
-			) {
-				try {
-					minds.set(
-						concurrentSynthSlug,
-						ensureMindSpec(ctx.cwd, concurrentSynthSlug),
-					);
-				} catch (err) {
-					notify(
-						ctx,
-						`Saved-room concurrentSynthesis mind "${concurrentSynthSlug}" is not loadable (${errorMessage(err)}). Skipping synthesis for this round.`,
-						"warning",
-					);
-					concurrentSynthSlug = undefined;
-				}
-			}
-			const forkPerMindRoomSlug =
-				activeRoom.slug && savedRoomCfg?.forkPerMind
-					? activeRoom.slug
-					: undefined;
-			const orchestration = buildOrchestrationContext(
-				ctx,
-				activeAbort.signal,
-				effectiveMode,
-				{ forkPerMindRoomSlug },
-			);
-			const groupChatConfig: GroupChatConfig | undefined =
-				effectiveMode === "group-chat"
-					? {
-							maxTurns:
-								savedRoomCfg?.groupChat?.maxTurns ??
-								DEFAULT_GROUP_CHAT_MAX_TURNS,
-							minRounds:
-								savedRoomCfg?.groupChat?.minRounds ??
-								DEFAULT_GROUP_CHAT_MIN_ROUNDS,
-							maxSpeakerRepeats:
-								savedRoomCfg?.groupChat?.maxSpeakerRepeats ??
-								DEFAULT_GROUP_CHAT_REPEAT_CAP,
-						}
-					: undefined;
-			const synthesisConfig = concurrentSynthSlug
-				? { mode: concurrentSynthSlug }
-				: undefined;
-			const result = await executeStrategy({
-				mode: effectiveMode,
-				userMessage,
-				mindsBySlug: minds,
-				participantOrder: effectiveParticipants,
-				moderatorSlug: effectiveModerator,
-				roundHistory: buildPriorRoundsHistory(ctx),
-				context: orchestration,
-				groupChatConfig,
-				synthesisConfig,
-			});
-			persistRoundToDisk(
-				ctx,
-				options.directAddress
-					? `@${options.directAddress} ${userMessage}`
-					: userMessage,
-				effectiveMode,
-				result.transcript,
-				roundStartedAt,
-			);
-		} catch (error) {
-			ctx.ui.notify(
-				`Chamber round failed: ${errorMessage(error)}`,
-				"error",
-			);
-		} finally {
-			stopStatusTicker();
-			setWorkingIndicator(ctx, false);
-			for (const tracker of participantTrackers) {
-				if (tracker.status === "thinking" || tracker.status === "speaking") {
-					tracker.status = "done";
-				}
-			}
-			syncParticipantWidget(ctx);
-			setRoomStatus(ctx, activeRoom);
-			activeAbort = undefined;
-		}
-	}
+	const orchestrator: TurnOrchestrator = createTurnOrchestrator({
+		pi,
+		getActiveRoom: () => activeRoom,
+		getParticipantTrackers: () => participantTrackers,
+		setParticipantTrackers: (trackers) => {
+			participantTrackers = trackers;
+		},
+		buildParticipantTrackers,
+		notify,
+		syncParticipantWidget,
+		setRoomStatus,
+		setWorkingIndicator,
+		startStatusTicker,
+		stopStatusTicker,
+		syncObservatoryLens,
+		errorMessage,
+	});
 
 	function parseDirectAddress(
 		text: string,
@@ -1046,14 +456,9 @@ export default function (pi: ExtensionAPI) {
 				notify(ctx, "No active room round to halt.", "warning");
 				return;
 			}
-			if (!activeAbort) {
+			if (!orchestrator.haltActive()) {
 				notify(ctx, "No in-flight round to halt.", "warning");
 				return;
-			}
-			try {
-				activeAbort.abort();
-			} catch {
-				/* ignore */
 			}
 			notify(ctx, "Halt sent. In-flight minds are wrapping up.", "info");
 		},
@@ -1102,10 +507,7 @@ export default function (pi: ExtensionAPI) {
 				notify(ctx, `/next "${slug}" ${reason}.`, "error");
 				return;
 			}
-			pendingDirectorOverrides = {
-				...pendingDirectorOverrides,
-				nextSpeaker: slug,
-			};
+			orchestrator.setNextSpeaker(slug);
 			notify(ctx, `Director override: next speaker = ${slug}.`, "info");
 		},
 	});
@@ -1128,10 +530,7 @@ export default function (pi: ExtensionAPI) {
 				notify(ctx, "Usage: /inject <text>", "error");
 				return;
 			}
-			pendingDirectorOverrides = {
-				...pendingDirectorOverrides,
-				directionInjection: text,
-			};
+			orchestrator.setDirectionInjection(text);
 			notify(
 				ctx,
 				`Director note queued for the next speaker: "${text}".`,
@@ -1147,7 +546,7 @@ export default function (pi: ExtensionAPI) {
 			activeRoom = undefined;
 			lastInactiveRoom = state;
 			participantTrackers = [];
-			resetObservatoryCounters();
+			orchestrator.resetRuntimeCounters();
 			activeRoomStartedAt = undefined;
 			setRoomStatus(eventCtx, undefined);
 			syncParticipantWidget(eventCtx);
@@ -1158,9 +557,9 @@ export default function (pi: ExtensionAPI) {
 		if (validation.ok && validation.state) {
 			activeRoom = validation.state;
 			lastInactiveRoom = undefined;
-			loadTranscriptForActive(eventCtx.cwd);
+			orchestrator.loadTranscriptForActive(eventCtx.cwd);
 			participantTrackers = buildParticipantTrackers(eventCtx.cwd, activeRoom);
-			resetObservatoryCounters();
+			orchestrator.resetRuntimeCounters();
 			activeRoomStartedAt =
 				activeRoom.activatedAt ?? new Date().toISOString();
 			setRoomStatus(eventCtx, activeRoom);
@@ -1171,8 +570,8 @@ export default function (pi: ExtensionAPI) {
 
 		activeRoom = undefined;
 		participantTrackers = [];
-		resetTranscriptState();
-		resetObservatoryCounters();
+		orchestrator.resetTranscriptState();
+		orchestrator.resetRuntimeCounters();
 		activeRoomStartedAt = undefined;
 		lastInactiveRoom = {
 			...state,
@@ -1219,7 +618,7 @@ export default function (pi: ExtensionAPI) {
 			};
 			activeRoom = undefined;
 			participantTrackers = [];
-			resetObservatoryCounters();
+			orchestrator.resetRuntimeCounters();
 			activeRoomStartedAt = undefined;
 			lastInactiveRoom = disabled;
 			persistState(disabled);
@@ -1241,13 +640,13 @@ export default function (pi: ExtensionAPI) {
 
 		const directAddress = parseDirectAddress(text, activeRoom.participants);
 		if (directAddress) {
-			void handleRoomTurn(eventCtx, directAddress.message, {
+			void orchestrator.handleRoomTurn(eventCtx, directAddress.message, {
 				directAddress: directAddress.slug,
 			});
 			return { action: "handled" } as const;
 		}
 
-		void handleRoomTurn(eventCtx, text);
+		void orchestrator.handleRoomTurn(eventCtx, text);
 		return { action: "handled" } as const;
 	});
 
@@ -1370,8 +769,8 @@ export default function (pi: ExtensionAPI) {
 		activeRoom = { ...validation.state, slug: saved.slug, name: saved.name };
 		lastInactiveRoom = undefined;
 		participantTrackers = buildParticipantTrackers(ctx.cwd, activeRoom);
-		loadTranscriptForActive(ctx.cwd);
-		resetObservatoryCounters();
+		orchestrator.loadTranscriptForActive(ctx.cwd);
+		orchestrator.resetRuntimeCounters();
 		activeRoomStartedAt = activeRoom.activatedAt ?? new Date().toISOString();
 		persistState(activeRoom);
 		setRoomStatus(ctx, activeRoom);
@@ -1379,7 +778,7 @@ export default function (pi: ExtensionAPI) {
 		syncObservatoryLens(ctx.cwd);
 		notify(
 			ctx,
-			`${describeActiveRoom(activeRoom, ctx.cwd)} Loaded ${activeDiskTranscript.length} prior turn${activeDiskTranscript.length === 1 ? "" : "s"}. Use /exit to stop routing.`,
+			`${describeActiveRoom(activeRoom, ctx.cwd)} Loaded ${orchestrator.getDiskTranscriptCount()} prior turn${orchestrator.getDiskTranscriptCount() === 1 ? "" : "s"}. Use /exit to stop routing.`,
 			"info",
 		);
 	}
@@ -1529,8 +928,8 @@ export default function (pi: ExtensionAPI) {
 		activeRoom = validated;
 		lastInactiveRoom = undefined;
 		participantTrackers = buildParticipantTrackers(ctx.cwd, activeRoom);
-		loadTranscriptForActive(ctx.cwd);
-		resetObservatoryCounters();
+		orchestrator.loadTranscriptForActive(ctx.cwd);
+		orchestrator.resetRuntimeCounters();
 		activeRoomStartedAt = activeRoom.activatedAt ?? new Date().toISOString();
 		persistState(activeRoom);
 		setRoomStatus(ctx, activeRoom);
@@ -1547,14 +946,7 @@ export default function (pi: ExtensionAPI) {
 		ctx: RoomCommandContext,
 		reason?: string,
 	): Promise<void> {
-		if (activeAbort) {
-			try {
-				activeAbort.abort();
-			} catch {
-				/* ignore */
-			}
-			activeAbort = undefined;
-		}
+		orchestrator.haltActive();
 		stopStatusTicker();
 		setWorkingIndicator(ctx, false);
 		const previous =
@@ -1576,15 +968,15 @@ export default function (pi: ExtensionAPI) {
 				};
 		activeRoom = undefined;
 		participantTrackers = [];
-		resetTranscriptState();
-		resetObservatoryCounters();
+		orchestrator.resetTranscriptState();
+		orchestrator.resetRuntimeCounters();
 		activeRoomStartedAt = undefined;
-		pendingDirectorOverrides = {};
+		orchestrator.clearDirectorOverrides();
 		lastInactiveRoom = inactive;
 		// Drop cached MindSpecs so the next /room on freshly reads each
 		// mind-config.json. Without this, edits to model/tools/fallbackModels
 		// between rooms within a single Pi session would be ignored until restart.
-		mindSpecCache.clear();
+		orchestrator.invalidateMindCache();
 		persistState(inactive);
 		setRoomStatus(ctx, undefined);
 		syncParticipantWidget(ctx);

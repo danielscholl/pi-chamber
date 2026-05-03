@@ -1,0 +1,679 @@
+import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import {
+	appendRoomTranscriptTurn,
+	buildRoomHistoryFromEntries,
+	DEFAULT_GROUP_CHAT_MAX_TURNS,
+	DEFAULT_GROUP_CHAT_MIN_ROUNDS,
+	DEFAULT_GROUP_CHAT_REPEAT_CAP,
+	readRoomTranscript,
+	resolveRoomSessionPath,
+	type RoomMode,
+	type RoomState,
+	type RoomTranscriptTurnV2,
+	safeReadSavedRoom,
+} from "./core.ts";
+import {
+	buildMindModeSystemPrompt,
+	loadMindConfig,
+	loadMindContext,
+} from "../mind/core.ts";
+import {
+	buildChairmanPersona,
+	CHAIRMAN_SLUG,
+	type ChamberHistoryTurn,
+} from "./prompts.ts";
+import {
+	type DirectorOverrides,
+	executeStrategy,
+	type GroupChatConfig,
+	type MindSpec,
+	type OrchestrationContext,
+	type SpawnFn,
+} from "./strategies.ts";
+import { spawnMind, type SpawnMindResult } from "./spawn.ts";
+import {
+	ROOM_CUSTOM_TYPES,
+	formatDurationMs,
+	type MindSpeechDetails,
+	type ModeratorDecisionDetails,
+	type ParticipantStatus,
+	paletteIndexForSlug,
+	type RoundMetricsDetails,
+} from "./ui.ts";
+import type { ParticipantTracker, RoomCommandContext } from "./types.ts";
+
+export type TurnRuntimeStats = {
+	lastReplyBySlug: Map<string, string>;
+	turnCountBySlug: Map<string, number>;
+	lastRoomMetrics:
+		| { mode: string; turns: number; durationMs: number }
+		| undefined;
+};
+
+export type TurnOrchestratorDeps = {
+	pi: ExtensionAPI;
+	getActiveRoom: () => RoomState | undefined;
+	getParticipantTrackers: () => ParticipantTracker[];
+	setParticipantTrackers: (trackers: ParticipantTracker[]) => void;
+	buildParticipantTrackers: (cwd: string, state: RoomState) => ParticipantTracker[];
+	notify: (
+		ctx: RoomCommandContext,
+		message: string,
+		level?: "info" | "warning" | "error",
+	) => void;
+	syncParticipantWidget: (ctx: RoomCommandContext) => void;
+	setRoomStatus: (
+		ctx: RoomCommandContext,
+		state?: RoomState,
+		extra?: string,
+	) => void;
+	setWorkingIndicator: (ctx: RoomCommandContext, on: boolean) => void;
+	startStatusTicker: (
+		ctx: RoomCommandContext,
+		getRoundStartedAt: () => number,
+	) => void;
+	stopStatusTicker: () => void;
+	syncObservatoryLens: (cwd: string) => void;
+	errorMessage: (err: unknown) => string;
+};
+
+export type TurnOrchestrator = {
+	handleRoomTurn: (
+		ctx: RoomCommandContext,
+		userMessage: string,
+		options?: { directAddress?: string },
+	) => Promise<void>;
+	haltActive: () => boolean;
+	isActive: () => boolean;
+	setNextSpeaker: (slug: string) => void;
+	setDirectionInjection: (text: string) => void;
+	clearDirectorOverrides: () => void;
+	resetTranscriptState: () => void;
+	loadTranscriptForActive: (cwd: string) => void;
+	resetRuntimeCounters: () => void;
+	invalidateMindCache: () => void;
+	getDiskTranscript: () => readonly RoomTranscriptTurnV2[];
+	getDiskTranscriptCount: () => number;
+	getPersistedRoundCount: () => number;
+	getRuntimeStats: () => TurnRuntimeStats;
+};
+
+export function createTurnOrchestrator(
+	deps: TurnOrchestratorDeps,
+): TurnOrchestrator {
+	const { pi } = deps;
+
+	let activeDiskTranscript: RoomTranscriptTurnV2[] = [];
+	let persistedRoundCount = 0;
+	let mindSpecCache = new Map<string, MindSpec>();
+	let cachedMindCwd: string | undefined;
+	let activeAbort: AbortController | undefined;
+	let roundStartedAt = 0;
+	let speechBuffers = new Map<string, { slug: string; text: string }>();
+	let messageCounter = 0;
+	let pendingDirectorOverrides: DirectorOverrides = {};
+	let lastReplyBySlug = new Map<string, string>();
+	let turnCountBySlug = new Map<string, number>();
+	let lastRoomMetrics:
+		| { mode: string; turns: number; durationMs: number }
+		| undefined;
+
+	function nextMessageId(): string {
+		messageCounter += 1;
+		return `room-msg-${messageCounter}-${Date.now()}`;
+	}
+
+	function emitMindSpeechMessage(
+		details: MindSpeechDetails,
+		text: string,
+		messageId: string,
+	): void {
+		try {
+			pi.sendMessage<MindSpeechDetails>({
+				customType: ROOM_CUSTOM_TYPES.mindSpeech,
+				content: text,
+				display: true,
+				details: { ...details, messageId } as MindSpeechDetails & {
+					messageId: string;
+				},
+			});
+		} catch {
+			// session may have ended
+		}
+	}
+
+	function emitModeratorDecisionMessage(
+		details: ModeratorDecisionDetails,
+		summary: string,
+	): void {
+		try {
+			pi.sendMessage<ModeratorDecisionDetails>({
+				customType: ROOM_CUSTOM_TYPES.moderatorDecision,
+				content: summary,
+				display: true,
+				details,
+			});
+		} catch {
+			// session may have ended
+		}
+	}
+
+	function emitRoundMetricsMessage(details: RoundMetricsDetails): void {
+		try {
+			pi.sendMessage<RoundMetricsDetails>({
+				customType: ROOM_CUSTOM_TYPES.roundMetrics,
+				content: `room round · ${details.turns} turns · ${formatDurationMs(details.durationMs)}`,
+				display: true,
+				details,
+			});
+		} catch {
+			// session may have ended
+		}
+	}
+
+	function emitUserRoomMessage(text: string): void {
+		try {
+			pi.sendMessage({
+				customType: ROOM_CUSTOM_TYPES.userMessage,
+				content: text,
+				display: true,
+			});
+		} catch {
+			// session may have ended
+		}
+	}
+
+	function setParticipantStatus(
+		slug: string,
+		status: ParticipantStatus,
+		ctx: RoomCommandContext,
+	): void {
+		const trackers = deps.getParticipantTrackers();
+		const tracker = trackers.find((p) => p.slug === slug);
+		if (tracker) tracker.status = status;
+		deps.syncParticipantWidget(ctx);
+	}
+
+	function ensureMindSpec(cwd: string, slug: string): MindSpec {
+		if (cachedMindCwd !== cwd) {
+			mindSpecCache.clear();
+			cachedMindCwd = cwd;
+		}
+		const cached = mindSpecCache.get(slug);
+		if (cached) return cached;
+		if (slug === CHAIRMAN_SLUG) {
+			const spec: MindSpec = {
+				slug: CHAIRMAN_SLUG,
+				persona: buildChairmanPersona(),
+				paletteIndex: paletteIndexForSlug(CHAIRMAN_SLUG),
+			};
+			mindSpecCache.set(slug, spec);
+			return spec;
+		}
+		const ctx = loadMindContext(cwd, slug);
+		const persona = buildMindModeSystemPrompt(ctx);
+		const config = loadMindConfig(cwd, slug);
+		const spec: MindSpec = {
+			slug,
+			persona,
+			paletteIndex: paletteIndexForSlug(slug),
+			model: config?.model,
+			fallbackModels: config?.fallbackModels,
+			tools: config?.tools,
+		};
+		mindSpecCache.set(slug, spec);
+		return spec;
+	}
+
+	function buildMindsBySlug(
+		cwd: string,
+		slugs: string[],
+		options: { includeChairman?: boolean } = {},
+	): Map<string, MindSpec> {
+		const map = new Map<string, MindSpec>();
+		for (const slug of slugs) {
+			map.set(slug, ensureMindSpec(cwd, slug));
+		}
+		if (options.includeChairman) {
+			map.set(CHAIRMAN_SLUG, ensureMindSpec(cwd, CHAIRMAN_SLUG));
+		}
+		return map;
+	}
+
+	function buildPriorRoundsHistory(
+		ctx: Pick<RoomCommandContext, "sessionManager">,
+		maxRounds = 2,
+	): ChamberHistoryTurn[] {
+		const sessionRounds = buildRoomHistoryFromEntries(
+			ctx.sessionManager.getEntries(),
+			maxRounds,
+		);
+		const need = Math.max(0, maxRounds - sessionRounds.length);
+		const diskPicked = need > 0 ? activeDiskTranscript.slice(-need) : [];
+		const turns: ChamberHistoryTurn[] = [];
+		// Disk-sourced rounds first (older), then session-sourced (more recent).
+		// Disk turns expose per-speaker fidelity; session turns are flat blobs
+		// because Pi session entries don't carry per-speaker attribution.
+		for (const dt of diskPicked) {
+			turns.push({ speaker: "user", content: dt.user });
+			for (const inner of dt.turns) {
+				turns.push({
+					speaker: inner.speaker,
+					content: inner.content,
+					turnNumber: inner.turnNumber,
+					isModerator: inner.role === "synthesis",
+				});
+			}
+		}
+		for (const sr of sessionRounds) {
+			turns.push({ speaker: "user", content: sr.user });
+			turns.push({ speaker: "room", content: sr.assistant });
+		}
+		return turns;
+	}
+
+	function persistRoundToDisk(
+		ctx: RoomCommandContext,
+		userMessage: string,
+		mode: RoomMode | string,
+		transcript: ChamberHistoryTurn[],
+		startedAt: number,
+	): void {
+		const activeRoom = deps.getActiveRoom();
+		if (!activeRoom?.active || !activeRoom.slug) return;
+		const ts = new Date().toISOString();
+		const turn: RoomTranscriptTurnV2 = {
+			version: 2,
+			user: userMessage,
+			mode,
+			durationMs: Date.now() - startedAt,
+			ts,
+			turns: transcript.map((t) => ({
+				speaker: t.speaker,
+				role: t.isModerator ? "synthesis" : "speaker",
+				content: t.content,
+				...(typeof t.turnNumber === "number"
+					? { turnNumber: t.turnNumber }
+					: {}),
+				paletteIndex: paletteIndexForSlug(t.speaker),
+			})),
+		};
+		try {
+			appendRoomTranscriptTurn(ctx.cwd, activeRoom.slug, turn);
+			activeDiskTranscript.push(turn);
+			persistedRoundCount += 1;
+		} catch {
+			// Persistence failures must not block the turn.
+		}
+	}
+
+	function buildOrchestrationContext(
+		ctx: RoomCommandContext,
+		signal: AbortSignal,
+		mode: RoomMode,
+		options: { forkPerMindRoomSlug?: string } = {},
+	): OrchestrationContext {
+		const speechBuffersLocal = speechBuffers;
+		const forkRoomSlug = options.forkPerMindRoomSlug;
+		const spawn: SpawnFn = (req) =>
+			spawnMind({
+				slug: req.slug,
+				persona: req.persona,
+				prompt: req.prompt,
+				cwd: req.cwd,
+				model: req.model,
+				fallbackModels: req.fallbackModels,
+				tools: req.tools,
+				// Chairman is the built-in stateless moderator; persisting its
+				// session would let routing/synthesis decisions accumulate
+				// hidden context across turns. Always cold-spawn it.
+				sessionFile:
+					forkRoomSlug && req.slug !== CHAIRMAN_SLUG
+						? resolveRoomSessionPath(req.cwd, forkRoomSlug, req.slug)
+						: undefined,
+				signal: req.signal,
+				onDelta: req.onDelta,
+				onAttemptStart: req.onAttemptStart,
+				noChildExtensions: true,
+			});
+
+		return {
+			cwd: ctx.cwd,
+			signal,
+			spawn,
+			emitMindStart: (slug, _role, _turnNumber) => {
+				const messageId = nextMessageId();
+				speechBuffersLocal.set(messageId, { slug, text: "" });
+				setParticipantStatus(slug, "speaking", ctx);
+				deps.syncObservatoryLens(ctx.cwd);
+				return messageId;
+			},
+			emitMindDelta: (messageId, _slug, delta) => {
+				const buf = speechBuffersLocal.get(messageId);
+				if (buf) buf.text += delta;
+			},
+			emitMindReset: (messageId, _slug) => {
+				// Wipe accumulated deltas so a fallback retry's stream is rendered
+				// cleanly and the emitMindEnd buffer-fallback never surfaces a
+				// concatenation of text from multiple model attempts.
+				const buf = speechBuffersLocal.get(messageId);
+				if (buf) buf.text = "";
+			},
+			emitMindEnd: (
+				messageId,
+				slug,
+				role,
+				result: SpawnMindResult,
+				turnNumber,
+			) => {
+				const buf = speechBuffersLocal.get(messageId);
+				const finalText = result.finalText || (buf?.text ?? "");
+				const details: MindSpeechDetails = {
+					slug,
+					mode,
+					role,
+					paletteIndex: paletteIndexForSlug(slug),
+					turnNumber,
+					durationMs: result.durationMs,
+					usage: {
+						input: result.usage.input,
+						output: result.usage.output,
+						cost: result.usage.cost,
+						turns: result.usage.turns,
+					},
+					model: result.model,
+					aborted: result.aborted,
+					stopReason: result.stopReason,
+				};
+				emitMindSpeechMessage(details, finalText, messageId);
+				speechBuffersLocal.delete(messageId);
+				setParticipantStatus(slug, result.aborted ? "aborted" : "done", ctx);
+				if (finalText.trim().length > 0) {
+					lastReplyBySlug.set(slug, finalText);
+				}
+				turnCountBySlug.set(slug, (turnCountBySlug.get(slug) ?? 0) + 1);
+				deps.syncObservatoryLens(ctx.cwd);
+			},
+			emitModeratorDecision: (moderatorSlug, decision) => {
+				emitModeratorDecisionMessage(
+					{
+						moderatorSlug,
+						moderatorPaletteIndex: paletteIndexForSlug(moderatorSlug),
+						action: decision.action,
+						phase: decision.phase,
+						nextSpeaker: decision.nextSpeaker,
+						direction: decision.direction,
+					},
+					decision.action === "close"
+						? `${moderatorSlug} closed the discussion`
+						: `${moderatorSlug} → ${decision.nextSpeaker || "?"}`,
+				);
+			},
+			emitRoundMetrics: (metrics) => {
+				emitRoundMetricsMessage(metrics);
+				lastRoomMetrics = {
+					mode: metrics.mode,
+					turns: metrics.turns,
+					durationMs: metrics.durationMs,
+				};
+				deps.syncObservatoryLens(ctx.cwd);
+			},
+			consumeDirectorOverrides: () => {
+				if (
+					!pendingDirectorOverrides.nextSpeaker &&
+					!pendingDirectorOverrides.directionInjection
+				) {
+					return undefined;
+				}
+				const consumed: DirectorOverrides = { ...pendingDirectorOverrides };
+				pendingDirectorOverrides = {};
+				return consumed;
+			},
+			notifyWarning: (message) => {
+				deps.notify(ctx, message, "warning");
+			},
+		};
+	}
+
+	async function handleRoomTurn(
+		ctx: RoomCommandContext,
+		userMessage: string,
+		options: { directAddress?: string } = {},
+	): Promise<void> {
+		const activeRoom = deps.getActiveRoom();
+		if (!activeRoom?.active) return;
+		if (activeAbort) {
+			activeAbort.abort();
+		}
+		activeAbort = new AbortController();
+		roundStartedAt = Date.now();
+		speechBuffers = new Map();
+
+		const effectiveMode: RoomMode = options.directAddress
+			? "concurrent"
+			: (activeRoom.mode as RoomMode);
+		const effectiveParticipants = options.directAddress
+			? [options.directAddress]
+			: activeRoom.participants;
+		const savedRoomCfg = activeRoom.slug
+			? safeReadSavedRoom(ctx.cwd, activeRoom.slug)
+			: undefined;
+		let effectiveModerator: string | undefined =
+			!options.directAddress && effectiveMode === "group-chat"
+				? savedRoomCfg?.synthesizer ?? CHAIRMAN_SLUG
+				: undefined;
+
+		const trackers = deps.buildParticipantTrackers(ctx.cwd, activeRoom);
+		for (const t of trackers) {
+			t.status = effectiveParticipants.includes(t.slug) ? "thinking" : "ready";
+		}
+		deps.setParticipantTrackers(trackers);
+		deps.syncParticipantWidget(ctx);
+
+		emitUserRoomMessage(userMessage);
+
+		deps.setWorkingIndicator(ctx, true);
+		deps.startStatusTicker(ctx, () => roundStartedAt);
+
+		try {
+			// Resolve concurrent-mode synthesizer (PR 5). false/undefined → off;
+			// true or "chairman" → chairman; any other string → participant slug.
+			// Direct-address turns (`@slug`) bypass orchestration entirely, so
+			// suppress synthesis even though `effectiveMode` is forced to
+			// "concurrent" for the spawn.
+			const concurrentSynth = savedRoomCfg?.concurrentSynthesis;
+			let concurrentSynthSlug: string | undefined =
+				!options.directAddress &&
+				effectiveMode === "concurrent" &&
+				concurrentSynth
+					? concurrentSynth === true || concurrentSynth === "chairman"
+						? CHAIRMAN_SLUG
+						: concurrentSynth
+					: undefined;
+
+			const includeChairman =
+				(effectiveMode === "group-chat" &&
+					effectiveModerator === CHAIRMAN_SLUG) ||
+				concurrentSynthSlug === CHAIRMAN_SLUG;
+			const minds = buildMindsBySlug(ctx.cwd, effectiveParticipants, {
+				includeChairman,
+			});
+			if (
+				effectiveMode === "group-chat" &&
+				effectiveModerator &&
+				effectiveModerator !== CHAIRMAN_SLUG &&
+				!minds.has(effectiveModerator)
+			) {
+				// Synthesizer is a hand-edited slug from room.json that may have
+				// been deleted or never existed. On load failure, warn once and
+				// fall back to the built-in chairman so the round still runs.
+				try {
+					minds.set(
+						effectiveModerator,
+						ensureMindSpec(ctx.cwd, effectiveModerator),
+					);
+				} catch (err) {
+					deps.notify(
+						ctx,
+						`Saved-room synthesizer "${effectiveModerator}" is not loadable (${deps.errorMessage(err)}). Falling back to chairman.`,
+						"warning",
+					);
+					effectiveModerator = CHAIRMAN_SLUG;
+					if (!minds.has(CHAIRMAN_SLUG)) {
+						minds.set(CHAIRMAN_SLUG, ensureMindSpec(ctx.cwd, CHAIRMAN_SLUG));
+					}
+				}
+			}
+			if (
+				concurrentSynthSlug &&
+				concurrentSynthSlug !== CHAIRMAN_SLUG &&
+				!minds.has(concurrentSynthSlug)
+			) {
+				try {
+					minds.set(
+						concurrentSynthSlug,
+						ensureMindSpec(ctx.cwd, concurrentSynthSlug),
+					);
+				} catch (err) {
+					deps.notify(
+						ctx,
+						`Saved-room concurrentSynthesis mind "${concurrentSynthSlug}" is not loadable (${deps.errorMessage(err)}). Skipping synthesis for this round.`,
+						"warning",
+					);
+					concurrentSynthSlug = undefined;
+				}
+			}
+			const forkPerMindRoomSlug =
+				activeRoom.slug && savedRoomCfg?.forkPerMind
+					? activeRoom.slug
+					: undefined;
+			const orchestration = buildOrchestrationContext(
+				ctx,
+				activeAbort.signal,
+				effectiveMode,
+				{ forkPerMindRoomSlug },
+			);
+			const groupChatConfig: GroupChatConfig | undefined =
+				effectiveMode === "group-chat"
+					? {
+							maxTurns:
+								savedRoomCfg?.groupChat?.maxTurns ??
+								DEFAULT_GROUP_CHAT_MAX_TURNS,
+							minRounds:
+								savedRoomCfg?.groupChat?.minRounds ??
+								DEFAULT_GROUP_CHAT_MIN_ROUNDS,
+							maxSpeakerRepeats:
+								savedRoomCfg?.groupChat?.maxSpeakerRepeats ??
+								DEFAULT_GROUP_CHAT_REPEAT_CAP,
+						}
+					: undefined;
+			const synthesisConfig = concurrentSynthSlug
+				? { mode: concurrentSynthSlug }
+				: undefined;
+			const result = await executeStrategy({
+				mode: effectiveMode,
+				userMessage,
+				mindsBySlug: minds,
+				participantOrder: effectiveParticipants,
+				moderatorSlug: effectiveModerator,
+				roundHistory: buildPriorRoundsHistory(ctx),
+				context: orchestration,
+				groupChatConfig,
+				synthesisConfig,
+			});
+			persistRoundToDisk(
+				ctx,
+				options.directAddress
+					? `@${options.directAddress} ${userMessage}`
+					: userMessage,
+				effectiveMode,
+				result.transcript,
+				roundStartedAt,
+			);
+		} catch (error) {
+			ctx.ui.notify(
+				`Chamber round failed: ${deps.errorMessage(error)}`,
+				"error",
+			);
+		} finally {
+			deps.stopStatusTicker();
+			deps.setWorkingIndicator(ctx, false);
+			const finalTrackers = deps.getParticipantTrackers();
+			for (const tracker of finalTrackers) {
+				if (tracker.status === "thinking" || tracker.status === "speaking") {
+					tracker.status = "done";
+				}
+			}
+			deps.syncParticipantWidget(ctx);
+			deps.setRoomStatus(ctx, deps.getActiveRoom());
+			activeAbort = undefined;
+		}
+	}
+
+	function resetTranscriptState(): void {
+		activeDiskTranscript = [];
+		persistedRoundCount = 0;
+	}
+
+	function loadTranscriptForActive(cwd: string): void {
+		const activeRoom = deps.getActiveRoom();
+		if (!activeRoom?.active || !activeRoom.slug) {
+			resetTranscriptState();
+			return;
+		}
+		try {
+			activeDiskTranscript = readRoomTranscript(cwd, activeRoom.slug);
+		} catch {
+			activeDiskTranscript = [];
+		}
+		persistedRoundCount = 0;
+	}
+
+	return {
+		handleRoomTurn,
+		haltActive: () => {
+			if (!activeAbort) return false;
+			try {
+				activeAbort.abort();
+			} catch {
+				/* ignore */
+			}
+			activeAbort = undefined;
+			return true;
+		},
+		isActive: () => activeAbort !== undefined,
+		setNextSpeaker: (slug: string) => {
+			pendingDirectorOverrides = {
+				...pendingDirectorOverrides,
+				nextSpeaker: slug,
+			};
+		},
+		setDirectionInjection: (text: string) => {
+			pendingDirectorOverrides = {
+				...pendingDirectorOverrides,
+				directionInjection: text,
+			};
+		},
+		clearDirectorOverrides: () => {
+			pendingDirectorOverrides = {};
+		},
+		resetTranscriptState,
+		loadTranscriptForActive,
+		resetRuntimeCounters: () => {
+			lastReplyBySlug = new Map();
+			turnCountBySlug = new Map();
+			lastRoomMetrics = undefined;
+		},
+		invalidateMindCache: () => {
+			mindSpecCache.clear();
+		},
+		getDiskTranscript: () => activeDiskTranscript,
+		getDiskTranscriptCount: () => activeDiskTranscript.length,
+		getPersistedRoundCount: () => persistedRoundCount,
+		getRuntimeStats: () => ({
+			lastReplyBySlug,
+			turnCountBySlug,
+			lastRoomMetrics,
+		}),
+	};
+}
