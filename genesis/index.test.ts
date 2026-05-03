@@ -12,6 +12,11 @@ import os from "node:os";
 import path from "node:path";
 import genesisExtension from "./index.ts";
 import { resolveGenesisPaths, validateMind } from "./core.ts";
+import type {
+	SpawnGenesisFn,
+	SpawnGenesisOptions,
+	SpawnGenesisResult,
+} from "./spawn.ts";
 
 async function withTempProject<T>(
 	fn: (cwd: string) => Promise<T> | T,
@@ -24,7 +29,30 @@ async function withTempProject<T>(
 	}
 }
 
-function createHarness() {
+function defaultAuthoringPayload(name: string): Record<string, string> {
+	return {
+		description: `${name} composed Genesis preset for testing.`,
+		soul: `# ${name}\n\nI keep the operation composed, briefed, and moving.`,
+		agentInstructions:
+			"# Runtime\n\nRead working memory first, brief crisply, and never store secrets.",
+		memory: `# Memory\n\n- Name: ${name}\n- Purpose: composed continuity for tests.`,
+		rules: "# Rules\n\n1. Protect attention.\n2. State uncertainty plainly.",
+		log: `# Log\n\n- Genesis completed via subagent stub for ${name}.`,
+		mindIndex:
+			"# Mind Index\n\n- SOUL.md: identity.\n- .working-memory/: memory, rules, and log.",
+	};
+}
+
+interface SpawnCall {
+	options: SpawnGenesisOptions;
+}
+
+interface HarnessOptions {
+	spawn?: SpawnGenesisFn;
+	payload?: (name: string) => Record<string, string>;
+}
+
+function createHarness(options: HarnessOptions = {}) {
 	const commands = new Map<
 		string,
 		{
@@ -43,7 +71,7 @@ function createHarness() {
 			) => Promise<unknown>;
 		}
 	>();
-	const sentMessages: string[] = [];
+	const spawnCalls: SpawnCall[] = [];
 	const auditEntries: Array<{
 		stream: string;
 		entry: Record<string, unknown>;
@@ -74,16 +102,45 @@ function createHarness() {
 			tools.set(namedTool.name, namedTool);
 		},
 		on() {},
-		sendUserMessage(message: string) {
-			sentMessages.push(message);
+		sendUserMessage() {
+			throw new Error(
+				"pi.sendUserMessage should not be called by Genesis after the subagent migration.",
+			);
 		},
 		appendEntry(stream: string, entry: Record<string, unknown>) {
 			auditEntries.push({ stream, entry });
 		},
 	};
 
-	genesisExtension(pi as never);
-	return { commands, tools, sentMessages, auditEntries };
+	const payloadFor = options.payload ?? defaultAuthoringPayload;
+	const spawnSubagent: SpawnGenesisFn =
+		options.spawn ??
+		(async (opts) => {
+			spawnCalls.push({ options: opts });
+			const nameMatch = /Your name: (.+)/.exec(opts.prompt);
+			const name = nameMatch ? nameMatch[1].trim() : opts.slug;
+			const payload = payloadFor(name);
+			return {
+				exitCode: 0,
+				finalText: JSON.stringify(payload),
+				stderr: "",
+				aborted: false,
+				durationMs: 1,
+			} satisfies SpawnGenesisResult;
+		});
+
+	if (options.spawn) {
+		const wrapped = options.spawn;
+		const recording: SpawnGenesisFn = async (opts) => {
+			spawnCalls.push({ options: opts });
+			return wrapped(opts);
+		};
+		genesisExtension(pi as never, { spawnSubagent: recording });
+	} else {
+		genesisExtension(pi as never, { spawnSubagent });
+	}
+
+	return { commands, tools, spawnCalls, auditEntries };
 }
 
 type TestNotification = {
@@ -143,15 +200,8 @@ function createContext(
 	return ctx;
 }
 
-function requestIdFromPrompt(prompt: string): string {
-	const match = prompt.match(/requestId: ([0-9a-f-]+)/);
-	expect(match).not.toBeNull();
-	return match?.[1] ?? "";
-}
-
-function authoredGenesisParams(requestId: string) {
+function moneypennyPayload(): Record<string, string> {
 	return {
-		requestId,
 		description:
 			"Miss Moneypenny, composed Chief of Staff for workspace operations.",
 		soul: "# Miss Moneypenny\n\nI keep the operation composed, briefed, and moving.",
@@ -161,7 +211,7 @@ function authoredGenesisParams(requestId: string) {
 			"# Memory\n\n- Name: Miss Moneypenny\n- Role: Chief of Staff\n- Purpose: briefings, priorities, follow-through, and operational memory.",
 		rules:
 			"# Rules\n\n1. Protect attention.\n2. State uncertainty plainly.\n3. Do not store secrets.",
-		log: "# Log\n\n- Genesis completed through genesis_write_files.",
+		log: "# Log\n\n- Genesis completed through subagent flow.",
 		mindIndex:
 			"# Mind Index\n\n- SOUL.md: identity.\n- .working-memory/: memory, rules, and log.\n- Agent shim: runtime entrypoint.",
 	};
@@ -226,32 +276,34 @@ describe("Genesis command flow", () => {
 		});
 	});
 
-	test("/genesis starter slug starts the matching built-in preset", async () => {
+	test("/genesis starter slug spawns the subagent with the right prompt", async () => {
 		await withTempProject(async (cwd) => {
 			const harness = createHarness();
 			const ctx = createContext(cwd);
 
 			await harness.commands.get("genesis")?.handler("moneypenny", ctx);
 
-			expect(harness.sentMessages).toHaveLength(1);
-			expect(harness.sentMessages[0]).toContain("Your name: Miss Moneypenny");
-			expect(harness.sentMessages[0]).toContain("Your slug: moneypenny");
-			expect(harness.sentMessages[0]).toContain(
+			expect(harness.spawnCalls).toHaveLength(1);
+			const prompt = harness.spawnCalls[0].options.prompt;
+			expect(harness.spawnCalls[0].options.slug).toBe("moneypenny");
+			expect(prompt).toContain("Your name: Miss Moneypenny");
+			expect(prompt).toContain("Your slug: moneypenny");
+			expect(prompt).toContain(
 				"Research this character or persona from model-local knowledge",
 			);
 		});
 	});
 
-	test("/genesis:moneypenny starts a pending authoring request and completes only through genesis_write_files", async () => {
+	test("/genesis:moneypenny runs the subagent and writes files from its JSON output", async () => {
 		await withTempProject(async (cwd) => {
-			const harness = createHarness();
+			const harness = createHarness({ payload: () => moneypennyPayload() });
 			const ctx = createContext(cwd);
 
 			await harness.commands.get("genesis:moneypenny")?.handler("", ctx);
 
-			expect(ctx.idleCalls).toBe(1);
-			expect(harness.sentMessages).toHaveLength(1);
-			const prompt = harness.sentMessages[0];
+			expect(ctx.idleCalls).toBe(0);
+			expect(harness.spawnCalls).toHaveLength(1);
+			const prompt = harness.spawnCalls[0].options.prompt;
 			expect(prompt).toContain("Your name: Miss Moneypenny");
 			expect(prompt).toContain("Your slug: moneypenny");
 			expect(prompt).toContain("Your role: Chief of Staff");
@@ -259,31 +311,12 @@ describe("Genesis command flow", () => {
 			expect(prompt).toContain("Research this character or persona");
 			expect(prompt).toContain("Do not browse or use network tools");
 			expect(prompt).toContain("Capture the energy");
-			expect(prompt).toContain("genesis_write_files exactly once");
+			expect(prompt).toContain(
+				"Your final assistant message must be exactly one JSON object",
+			);
+			expect(prompt).not.toContain("genesis_write_files");
 
 			const paths = resolveGenesisPaths(cwd, "moneypenny");
-			expect(fs.existsSync(paths.soulPath)).toBe(false);
-			expect(fs.existsSync(paths.mindIndexPath)).toBe(false);
-			expect(fs.existsSync(paths.memoryPath)).toBe(true);
-			expect(fs.readFileSync(paths.memoryPath, "utf-8")).toBe("");
-			expect(fs.existsSync(paths.rulesPath)).toBe(true);
-			expect(fs.readFileSync(paths.rulesPath, "utf-8")).toBe("");
-			expect(fs.existsSync(paths.logPath)).toBe(true);
-			expect(fs.readFileSync(paths.logPath, "utf-8")).toBe("");
-			expect(fs.existsSync(paths.shimPath)).toBe(false);
-
-			const requestId = requestIdFromPrompt(prompt);
-			const toolResult = await harness.tools
-				.get("genesis_write_files")
-				?.execute("tool-call-1", authoredGenesisParams(requestId));
-
-			expect(toolResult).toEqual(expect.objectContaining({ terminate: true }));
-			expect(JSON.stringify(toolResult)).toContain(
-				"Try direct chat: /mind moneypenny",
-			);
-			expect(JSON.stringify(toolResult)).toContain(
-				"Try delegated task: /run moneypenny",
-			);
 			expect(fs.readFileSync(paths.soulPath, "utf-8")).toContain(
 				"I keep the operation composed",
 			);
@@ -310,10 +343,15 @@ describe("Genesis command flow", () => {
 					source: "moneypenny",
 				}),
 			);
+
+			const completionNotice = ctx.notifications.find(
+				(n) => n.type === "info" && n.message.startsWith("Genesis complete."),
+			);
+			expect(completionNotice).toBeDefined();
 		});
 	});
 
-	test("/genesis UI Miss Moneypenny selection uses the same pending prompt flow", async () => {
+	test("/genesis UI Miss Moneypenny selection runs the subagent", async () => {
 		await withTempProject(async (cwd) => {
 			const harness = createHarness();
 			const ctx = createContext(cwd, { selectValue: "Miss Moneypenny" });
@@ -326,11 +364,13 @@ describe("Genesis command flow", () => {
 				"Mycroft",
 				"Jarvis",
 			]);
-			expect(harness.sentMessages).toHaveLength(1);
-			expect(harness.sentMessages[0]).toContain("Your slug: moneypenny");
+			expect(harness.spawnCalls).toHaveLength(1);
+			expect(harness.spawnCalls[0].options.prompt).toContain(
+				"Your slug: moneypenny",
+			);
 			expect(
 				fs.existsSync(resolveGenesisPaths(cwd, "moneypenny").shimPath),
-			).toBe(false);
+			).toBe(true);
 		});
 	});
 
@@ -341,11 +381,12 @@ describe("Genesis command flow", () => {
 
 			await harness.commands.get("genesis:mycroft")?.handler("", ctx);
 
-			expect(harness.sentMessages).toHaveLength(1);
-			expect(harness.sentMessages[0]).toContain("Your name: Mycroft");
-			expect(harness.sentMessages[0]).toContain("Your role: Research Partner");
-			expect(harness.sentMessages[0]).toContain("Mycroft Holmes");
-			expect(harness.sentMessages[0]).toContain("pattern");
+			expect(harness.spawnCalls).toHaveLength(1);
+			const prompt = harness.spawnCalls[0].options.prompt;
+			expect(prompt).toContain("Your name: Mycroft");
+			expect(prompt).toContain("Your role: Research Partner");
+			expect(prompt).toContain("Mycroft Holmes");
+			expect(prompt).toContain("pattern");
 		});
 	});
 
@@ -356,17 +397,16 @@ describe("Genesis command flow", () => {
 
 			await harness.commands.get("genesis:jarvis")?.handler("", ctx);
 
-			expect(harness.sentMessages).toHaveLength(1);
-			expect(harness.sentMessages[0]).toContain("Your name: Jarvis");
-			expect(harness.sentMessages[0]).toContain(
-				"Your role: Engineering Partner",
-			);
-			expect(harness.sentMessages[0]).toContain("J.A.R.V.I.S.'s");
-			expect(harness.sentMessages[0]).toContain("diagnostics");
+			expect(harness.spawnCalls).toHaveLength(1);
+			const prompt = harness.spawnCalls[0].options.prompt;
+			expect(prompt).toContain("Your name: Jarvis");
+			expect(prompt).toContain("Your role: Engineering Partner");
+			expect(prompt).toContain("J.A.R.V.I.S.'s");
+			expect(prompt).toContain("diagnostics");
 		});
 	});
 
-	test("custom Genesis args still create a custom pending request", async () => {
+	test("custom Genesis args spawn the subagent with custom voice fields", async () => {
 		await withTempProject(async (cwd) => {
 			const harness = createHarness();
 			const ctx = createContext(cwd, { hasUI: false });
@@ -378,18 +418,67 @@ describe("Genesis command flow", () => {
 					ctx,
 				);
 
-			expect(harness.sentMessages).toHaveLength(1);
-			const prompt = harness.sentMessages[0];
+			expect(harness.spawnCalls).toHaveLength(1);
+			const prompt = harness.spawnCalls[0].options.prompt;
 			expect(prompt).toContain("Your name: Ariadne");
 			expect(prompt).toContain("Your slug: ariadne");
 			expect(prompt).toContain("Your role: OSDU architecture scout");
 			expect(prompt).toContain('Character/voice: "calm systems thinker"');
 			expect(prompt).not.toContain("Miss Moneypenny");
 			const paths = resolveGenesisPaths(cwd, "ariadne");
+			expect(fs.existsSync(paths.soulPath)).toBe(true);
+			expect(fs.existsSync(paths.shimPath)).toBe(true);
+		});
+	});
+
+	test("subagent failure surfaces an error and leaves scaffold for inspection", async () => {
+		await withTempProject(async (cwd) => {
+			const harness = createHarness({
+				spawn: async () => ({
+					exitCode: 2,
+					finalText: "",
+					stderr: "boom",
+					aborted: false,
+					durationMs: 1,
+				}),
+			});
+			const ctx = createContext(cwd);
+
+			await harness.commands.get("genesis:moneypenny")?.handler("", ctx);
+
+			const errorNotice = ctx.notifications.find((n) => n.type === "error");
+			expect(errorNotice?.message).toContain(
+				"Genesis subagent exited with code 2",
+			);
+			expect(errorNotice?.message).toContain("boom");
+			expect(errorNotice?.message).toContain("delete before retrying");
+			const paths = resolveGenesisPaths(cwd, "moneypenny");
+			expect(fs.existsSync(paths.mindPath)).toBe(true);
 			expect(fs.existsSync(paths.soulPath)).toBe(false);
-			expect(fs.existsSync(paths.memoryPath)).toBe(true);
-			expect(fs.readFileSync(paths.memoryPath, "utf-8")).toBe("");
-			expect(fs.existsSync(paths.shimPath)).toBe(false);
+			expect(harness.auditEntries).toHaveLength(0);
+		});
+	});
+
+	test("invalid subagent JSON surfaces a parse error", async () => {
+		await withTempProject(async (cwd) => {
+			const harness = createHarness({
+				spawn: async () => ({
+					exitCode: 0,
+					finalText: "not json at all",
+					stderr: "",
+					aborted: false,
+					durationMs: 1,
+				}),
+			});
+			const ctx = createContext(cwd);
+
+			await harness.commands.get("genesis:moneypenny")?.handler("", ctx);
+
+			const errorNotice = ctx.notifications.find((n) => n.type === "error");
+			expect(errorNotice?.message).toContain(
+				"Genesis subagent output was not valid JSON",
+			);
+			expect(harness.auditEntries).toHaveLength(0);
 		});
 	});
 
@@ -402,7 +491,7 @@ describe("Genesis command flow", () => {
 
 			await harness.commands.get("genesis:moneypenny")?.handler("", ctx);
 
-			expect(harness.sentMessages).toHaveLength(0);
+			expect(harness.spawnCalls).toHaveLength(0);
 			expect(ctx.notifications).toEqual([
 				expect.objectContaining({
 					type: "error",
@@ -422,7 +511,7 @@ describe("Genesis command flow", () => {
 
 			await harness.commands.get("genesis:moneypenny")?.handler("", ctx);
 
-			expect(harness.sentMessages).toHaveLength(0);
+			expect(harness.spawnCalls).toHaveLength(0);
 			expect(ctx.notifications).toEqual([
 				expect.objectContaining({
 					type: "error",

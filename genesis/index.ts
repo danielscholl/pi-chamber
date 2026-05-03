@@ -15,10 +15,12 @@ import {
 	createMindStructure,
 	seedSharedDoctrine,
 	ensureTrailingNewline,
+	type GenesisAuthoringContent,
 	type GenesisConfig,
 	type GenesisPaths,
 	loadGenesisConfig,
 	normalizeVoiceDescription,
+	parseGenesisAuthoringJson,
 	type PendingGenesisRequest,
 	parseGenesisArgs,
 	resolveGenesisPaths,
@@ -27,8 +29,13 @@ import {
 } from "./core.ts";
 import {
 	buildAgentShim,
-	buildGenesisAuthoringPrompt,
+	buildGenesisSubagentAuthoringPrompt,
 } from "./prompts.ts";
+import {
+	spawnGenesisAuthoring,
+	type SpawnGenesisFn,
+	type SpawnGenesisResult,
+} from "./spawn.ts";
 import {
 	findGenesisStarterByName,
 	GENESIS_STARTERS,
@@ -85,8 +92,17 @@ type GenesisCommandContext = {
 	waitForIdle(): Promise<void>;
 	ui: {
 		notify(message: string, type?: "info" | "warning" | "error"): void;
+		setStatus?(key: string, value: string): void;
 	};
 };
+
+export interface GenesisExtensionDeps {
+	/**
+	 * Spawn helper used to run the authoring prompt in a child Pi process.
+	 * Defaults to {@link spawnGenesisAuthoring}; tests inject a stub.
+	 */
+	spawnSubagent?: SpawnGenesisFn;
+}
 
 type AutocompleteItem = {
 	value: string;
@@ -94,8 +110,13 @@ type AutocompleteItem = {
 	description?: string;
 };
 
-export default function (pi: ExtensionAPI) {
+export default function (
+	pi: ExtensionAPI,
+	deps: GenesisExtensionDeps = {},
+) {
 	const pending = new Map<string, PendingGenesisRequest>();
+	const spawnSubagent: SpawnGenesisFn =
+		deps.spawnSubagent ?? spawnGenesisAuthoring;
 
 	function pruneExpiredRequests(now = Date.now()): void {
 		for (const [requestId, request] of pending) {
@@ -248,7 +269,7 @@ export default function (pi: ExtensionAPI) {
 			ctx,
 			{
 				alreadyExistsLabel: "Genesis starter",
-				startedMessage: `Genesis started for ${starter.name}. The model should call genesis_write_files to finish the ${starter.name} preset.`,
+				startedMessage: `Authoring ${starter.name} (${starter.slug}).`,
 			},
 		);
 	}
@@ -349,25 +370,90 @@ export default function (pi: ExtensionAPI) {
 		};
 		pending.set(request.requestId, request);
 
-		const prompt = buildGenesisAuthoringPrompt(request);
+		notify(
+			ctx,
+			options.startedMessage ?? `Authoring ${name} (${slug}).`,
+			"info",
+		);
+		const stopProgress = startGenesisProgress(ctx, slug);
+
+		let spawnResult: SpawnGenesisResult;
 		try {
-			await ctx.waitForIdle();
-			pi.sendUserMessage(prompt);
+			const prompt = buildGenesisSubagentAuthoringPrompt(request);
+			spawnResult = await spawnSubagent({
+				slug: request.slug,
+				prompt,
+				cwd: request.cwd,
+			});
 		} catch (error) {
+			stopProgress();
 			pending.delete(request.requestId);
+			setStatus(ctx, "genesis ready");
 			notify(
 				ctx,
-				`Genesis could not start authoring prompt: ${errorMessage(error)}`,
+				`Genesis subagent failed to start: ${errorMessage(error)}. Scaffolded directories remain at ${relativeToCwd(paths.cwd, paths.mindPath)}; delete before retrying.`,
 				"error",
 			);
 			return;
 		}
-		notify(
-			ctx,
-			options.startedMessage ??
-				`Genesis started for ${name}. The model should call genesis_write_files to finish.`,
-			"info",
-		);
+
+		stopProgress();
+
+		if (spawnResult.aborted) {
+			pending.delete(request.requestId);
+			notify(
+				ctx,
+				`Genesis subagent was aborted. Scaffolded directories remain at ${relativeToCwd(paths.cwd, paths.mindPath)}; delete before retrying.`,
+				"warning",
+			);
+			return;
+		}
+
+		if (spawnResult.exitCode !== 0) {
+			pending.delete(request.requestId);
+			const detail = spawnResult.stderr.trim()
+				? ` Stderr: ${spawnResult.stderr.trim().slice(0, 400)}`
+				: "";
+			notify(
+				ctx,
+				`Genesis subagent exited with code ${spawnResult.exitCode}.${detail} Scaffolded directories remain at ${relativeToCwd(paths.cwd, paths.mindPath)}; delete before retrying.`,
+				"error",
+			);
+			return;
+		}
+
+		let parsed: GenesisAuthoringContent;
+		try {
+			parsed = parseGenesisAuthoringJson(spawnResult.finalText);
+		} catch (error) {
+			pending.delete(request.requestId);
+			setStatus(ctx, "genesis ready");
+			notify(
+				ctx,
+				`Genesis subagent output was not valid JSON: ${errorMessage(error)} Scaffolded directories remain at ${relativeToCwd(paths.cwd, paths.mindPath)}; delete before retrying.`,
+				"error",
+			);
+			return;
+		}
+
+		let completion: ReturnType<typeof completeGenesisRequest>;
+		try {
+			completion = completeGenesisRequest({
+				requestId: request.requestId,
+				...parsed,
+			});
+		} catch (error) {
+			setStatus(ctx, "genesis ready");
+			notify(
+				ctx,
+				`Genesis write failed: ${errorMessage(error)} Scaffolded directories remain at ${relativeToCwd(paths.cwd, paths.mindPath)}; delete before retrying.`,
+				"error",
+			);
+			return;
+		}
+
+		setStatus(ctx, "genesis ready");
+		notify(ctx, completion.message, "info");
 	}
 
 	function completeGenesisRequest(params: GenesisWriteFilesParams) {
@@ -699,6 +785,113 @@ function notify(
 	if (type === "error") {
 		throw new Error(message);
 	}
+}
+
+function setStatus(ctx: GenesisCommandContext, value: string): void {
+	if (!ctx.hasUI) return;
+	const setter = ctx.ui.setStatus;
+	if (typeof setter !== "function") return;
+	try {
+		setter.call(ctx.ui, "genesis", value);
+	} catch {
+		/* status updates are best-effort */
+	}
+}
+
+const GENESIS_SPINNER_FRAMES = [
+	"⠋",
+	"⠙",
+	"⠹",
+	"⠸",
+	"⠼",
+	"⠴",
+	"⠦",
+	"⠧",
+	"⠇",
+	"⠏",
+];
+
+const GENESIS_BIRTH_PHRASES = [
+	"systems initializing",
+	"drafting soul",
+	"writing memory",
+	"encoding rules",
+	"indexing knowledge",
+	"awaiting genesis",
+];
+
+const PROGRESS_FRAME_INTERVAL_MS = 120;
+const PROGRESS_PHRASE_INTERVAL_MS = 1800;
+const PROGRESS_WIDGET_KEY = "genesis-progress";
+
+type SetWidgetFn = (
+	key: string,
+	content: string[] | undefined,
+	options?: { placement?: "aboveEditor" | "belowEditor" },
+) => void;
+
+function startGenesisProgress(
+	ctx: GenesisCommandContext,
+	slug: string,
+): () => void {
+	if (!ctx.hasUI) return () => {};
+
+	const setWidget = (
+		ctx.ui as { setWidget?: SetWidgetFn }
+	).setWidget;
+
+	const startedAt = Date.now();
+	let frame = 0;
+	let stopped = false;
+
+	const renderLine = () => {
+		const elapsedMs = Date.now() - startedAt;
+		const seconds = Math.floor(elapsedMs / 1000);
+		const phraseIndex =
+			Math.floor(elapsedMs / PROGRESS_PHRASE_INTERVAL_MS) %
+			GENESIS_BIRTH_PHRASES.length;
+		const spinner =
+			GENESIS_SPINNER_FRAMES[frame % GENESIS_SPINNER_FRAMES.length];
+		return `${spinner} genesis ${slug} | ${GENESIS_BIRTH_PHRASES[phraseIndex]}… ${seconds}s`;
+	};
+
+	const tick = () => {
+		if (stopped) return;
+		const line = renderLine();
+		if (typeof setWidget === "function") {
+			try {
+				setWidget(PROGRESS_WIDGET_KEY, [line], { placement: "aboveEditor" });
+			} catch {
+				/* widget updates are best-effort */
+			}
+		}
+		setStatus(ctx, line);
+		frame += 1;
+	};
+
+	tick();
+	const handle = setInterval(tick, PROGRESS_FRAME_INTERVAL_MS);
+	if (typeof handle === "object" && handle !== null && "unref" in handle) {
+		try {
+			(handle as { unref(): void }).unref();
+		} catch {
+			/* unref is best-effort; not all runtimes expose it */
+		}
+	}
+
+	return () => {
+		if (stopped) return;
+		stopped = true;
+		clearInterval(handle as unknown as ReturnType<typeof setInterval>);
+		if (typeof setWidget === "function") {
+			try {
+				setWidget(PROGRESS_WIDGET_KEY, undefined);
+			} catch {
+				/* clearing the widget is best-effort */
+			}
+		}
+		setStatus(ctx, "genesis ready");
+	};
 }
 
 function relativeToCwd(cwd: string, targetPath: string): string {

@@ -14,6 +14,7 @@ import { resolveGenesisPaths } from "./core.ts";
 import {
 	buildAgentShim,
 	buildGenesisAuthoringPrompt,
+	buildGenesisSubagentAuthoringPrompt,
 } from "./prompts.ts";
 
 function withTempProject<T>(fn: (cwd: string) => T): T {
@@ -87,6 +88,46 @@ describe("buildGenesisAuthoringPrompt", () => {
 				"mindIndex",
 			]) {
 				expect(prompt).toContain(field);
+			}
+		});
+	});
+});
+
+describe("buildGenesisSubagentAuthoringPrompt", () => {
+	test("instructs the subagent to emit JSON instead of calling tools", () => {
+		withTempProject((cwd) => {
+			const paths = resolveGenesisPaths(cwd, "ariadne");
+			const prompt = buildGenesisSubagentAuthoringPrompt({
+				requestId: "request-123",
+				name: "Ariadne",
+				slug: "ariadne",
+				role: "OSDU architecture scout",
+				voiceDescription: 'Character/voice: "calm systems thinker"',
+				paths,
+			});
+
+			expect(prompt).toContain("Your name: Ariadne");
+			expect(prompt).toContain("Your slug: ariadne");
+			expect(prompt).toContain('Character/voice: "calm systems thinker"');
+			expect(prompt).toContain("model-local knowledge only");
+			expect(prompt).toContain(
+				"Your final assistant message must be exactly one JSON object",
+			);
+			expect(prompt).toContain("Do not call tools");
+			expect(prompt).toContain("Do not include markdown fences around the JSON");
+			expect(prompt).not.toContain("genesis_write_files");
+			expect(prompt).not.toContain("requestId:");
+
+			for (const field of [
+				"description",
+				"soul",
+				"agentInstructions",
+				"memory",
+				"rules",
+				"log",
+				"mindIndex",
+			]) {
+				expect(prompt).toContain(`"${field}"`);
 			}
 		});
 	});

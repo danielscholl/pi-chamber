@@ -19,6 +19,7 @@ import {
 	loadGenesisConfig,
 	normalizeVoiceDescription,
 	parseGenesisArgs,
+	parseGenesisAuthoringJson,
 	quoteYamlString,
 	resolveGenesisPaths,
 	seedSharedDoctrine,
@@ -355,5 +356,54 @@ describe("string helpers", () => {
 		expect(ensureTrailingNewline("hello\n")).toBe("hello\n");
 		expect(collapseOneLine(" hello\n\tworld  ")).toBe("hello world");
 		expect(quoteYamlString('say "hello"')).toBe('"say \\"hello\\""');
+	});
+});
+
+describe("parseGenesisAuthoringJson", () => {
+	const completePayload = {
+		description: "Test mind",
+		soul: "# soul\n\nbody",
+		agentInstructions: "# runtime\n\ndo work",
+		memory: "# memory\n\n- a",
+		rules: "# rules\n\n- b",
+		log: "# log\n\n- c",
+		mindIndex: "# index\n\n- d",
+	};
+
+	test("parses a bare JSON object", () => {
+		expect(parseGenesisAuthoringJson(JSON.stringify(completePayload))).toEqual(
+			completePayload,
+		);
+	});
+
+	test("parses JSON wrapped in markdown fences", () => {
+		const fenced = "```json\n" + JSON.stringify(completePayload) + "\n```";
+		expect(parseGenesisAuthoringJson(fenced)).toEqual(completePayload);
+	});
+
+	test("parses JSON preceded by prose", () => {
+		const noisy =
+			"Here is the genesis payload:\n\n" + JSON.stringify(completePayload);
+		expect(parseGenesisAuthoringJson(noisy)).toEqual(completePayload);
+	});
+
+	test("rejects output with no JSON", () => {
+		expect(() => parseGenesisAuthoringJson("just prose, no JSON here")).toThrow(
+			/did not contain a JSON object/,
+		);
+	});
+
+	test("rejects JSON missing required fields", () => {
+		const partial = { ...completePayload, soul: "" };
+		expect(() => parseGenesisAuthoringJson(JSON.stringify(partial))).toThrow(
+			/missing non-empty fields: soul/,
+		);
+	});
+
+	test("rejects JSON with non-string values", () => {
+		const partial = { ...completePayload, memory: 42 };
+		expect(() => parseGenesisAuthoringJson(JSON.stringify(partial))).toThrow(
+			/missing non-empty fields: memory/,
+		);
 	});
 });

@@ -379,6 +379,112 @@ export function ensureTrailingNewline(value: string): string {
 	return value.endsWith("\n") ? value : `${value}\n`;
 }
 
+export interface GenesisAuthoringContent {
+	description: string;
+	soul: string;
+	agentInstructions: string;
+	memory: string;
+	rules: string;
+	log: string;
+	mindIndex: string;
+}
+
+const GENESIS_AUTHORING_FIELDS: Array<keyof GenesisAuthoringContent> = [
+	"description",
+	"soul",
+	"agentInstructions",
+	"memory",
+	"rules",
+	"log",
+	"mindIndex",
+];
+
+// Extracts a Genesis authoring JSON payload from raw subagent output. Tries
+// progressively looser strategies so a model that wraps the JSON in fences
+// or a leading sentence still parses cleanly. Throws when no field-complete
+// JSON object can be found.
+export function parseGenesisAuthoringJson(
+	rawText: string,
+): GenesisAuthoringContent {
+	const candidates = collectJsonCandidates(rawText);
+	if (candidates.length === 0) {
+		throw new Error(
+			"Genesis subagent output did not contain a JSON object. Re-run /genesis to retry.",
+		);
+	}
+
+	let lastValidationError: Error | null = null;
+	for (const candidate of candidates) {
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(candidate);
+		} catch {
+			continue;
+		}
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+			continue;
+		}
+		try {
+			return validateAuthoringContent(parsed as Record<string, unknown>);
+		} catch (error) {
+			lastValidationError =
+				error instanceof Error ? error : new Error(String(error));
+		}
+	}
+
+	if (lastValidationError) throw lastValidationError;
+	throw new Error(
+		"Genesis subagent output contained JSON but no candidate parsed successfully.",
+	);
+}
+
+function collectJsonCandidates(rawText: string): string[] {
+	const trimmed = rawText.trim();
+	const candidates: string[] = [];
+	if (trimmed.startsWith("{")) candidates.push(trimmed);
+
+	const fence = matchFencedJson(trimmed);
+	if (fence) candidates.push(fence);
+
+	const braced = matchBracedJson(trimmed);
+	if (braced) candidates.push(braced);
+
+	return Array.from(new Set(candidates));
+}
+
+function matchFencedJson(text: string): string | null {
+	const fence = /```(?:json)?\s*\n([\s\S]*?)\n```/i.exec(text);
+	return fence ? fence[1].trim() : null;
+}
+
+function matchBracedJson(text: string): string | null {
+	const start = text.indexOf("{");
+	const end = text.lastIndexOf("}");
+	if (start < 0 || end < 0 || end <= start) return null;
+	return text.slice(start, end + 1).trim();
+}
+
+function validateAuthoringContent(
+	value: Record<string, unknown>,
+): GenesisAuthoringContent {
+	const result: Partial<GenesisAuthoringContent> = {};
+	const missing: string[] = [];
+	for (const field of GENESIS_AUTHORING_FIELDS) {
+		const raw = value[field];
+		if (typeof raw !== "string" || !raw.trim()) {
+			missing.push(field);
+			continue;
+		}
+		result[field] = raw;
+	}
+	if (missing.length > 0) {
+		throw new Error(
+			`Genesis subagent JSON missing non-empty fields: ${missing.join(", ")}.`,
+		);
+	}
+	return result as GenesisAuthoringContent;
+}
+
 export function collapseOneLine(value: string): string {
 	return value.replace(/\s+/g, " ").trim();
 }

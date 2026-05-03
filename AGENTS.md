@@ -15,8 +15,9 @@ For user-facing context, read `README.md`. This file is the operational contract
 
 ```text
 genesis/index.ts             # /genesis, /genesis:<starter>, genesis_write_files tool
-genesis/core.ts              # pure helpers + validation
-genesis/prompts.ts           # authoring prompt + subagent shim builder
+genesis/core.ts              # pure helpers + validation + subagent JSON parser
+genesis/prompts.ts           # authoring prompt (legacy + subagent JSON variant) + shim builder
+genesis/spawn.ts             # child-Pi spawn helper for /genesis subagent authoring
 genesis/starters.ts          # built-in starter metadata
 
 mind/index.ts           # /mind direct-chat runtime wiring
@@ -50,19 +51,17 @@ When delegating to a mind, make the task mode explicit:
 
 Mind briefings are read-only unless the user explicitly asks for capture, ingest, or implementation.
 
-Do not bypass Genesis authoring rules. Live `/genesis` requests still write generated mind files only through `genesis_write_files`.
+Do not bypass Genesis authoring rules. Live `/genesis` requests run in a child Pi subagent (`genesis/spawn.ts`); the subagent emits a single JSON object with the seven authored fields, and the parent extension parses it and performs the project-local writes through the same validated helper used by `genesis_write_files`. The `genesis_write_files` tool stays registered for any caller that still wants the tool path, but the live `/genesis` flow no longer relies on it.
 
 ## Genesis rules
 
 - v1 output stays inside the consumer project: `.pi/minds`, `.pi/agents`, and (when `seedLensViews` is on, the default) a starter newspaper lens under `.pi/observatory/lenses/<slug>-newspaper/`.
 - Do not add network calls, registry fetches, automatic commits, lens seeding, or chamber runtime coupling unless explicitly requested.
-- The extension owns generated file writes through `genesis_write_files`; do not bypass that flow during a live `/genesis` request.
+- Live `/genesis` runs in a child Pi process (`genesis/spawn.ts`) launched with `--no-extensions`; the subagent emits one JSON object containing the seven authored fields and the parent writes the files via the same internal helper that backs `genesis_write_files`. The tool itself stays registered for compatibility but is not the live path.
 - Validate path containment with robust path helpers, not string-prefix checks.
-- Keep deterministic logic in `genesis/core.ts` / `genesis/prompts.ts` so it can be tested without a live Pi runtime.
+- Keep deterministic logic in `genesis/core.ts` / `genesis/prompts.ts` (including the JSON parser and the subagent prompt builder) so it can be tested without a live Pi runtime.
 - Generated shims should remain compatible with `pi-subagents` frontmatter and should instruct agents to read shared IDEA doctrine plus their mind files at task start.
-- `mind` reads and injects shared IDEA doctrine plus existing mind files for direct chat in the main session; it must not bypass `genesis_write_files` during live `/genesis` authoring.
-
-If a `/genesis` prompt provides a `requestId`, call `genesis_write_files` exactly once. Do not write Genesis mind files directly.
+- `mind` reads and injects shared IDEA doctrine plus existing mind files for direct chat in the main session; it must not bypass the Genesis write helper during live `/genesis` authoring.
 
 ## Room rules
 
