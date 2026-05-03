@@ -168,7 +168,7 @@ When asked to update an existing lens:
 
 ## The newspaper convention
 
-A "newspaper" is a sectioned briefing whose lens slug ends in `-newspaper` (e.g., `jarvis-newspaper`). It's the daily glance at one mind. Operators get one scaffolded automatically per Genesis mind (via `/genesis`, or manually via `/observatory:newspaper`).
+A "newspaper" is a sectioned briefing whose lens slug ends in `-newspaper` (e.g., `jarvis-newspaper`). It's the daily glance at one mind. Operators get one scaffolded automatically per Genesis mind (via `/genesis`, when `seedLensViews` is on — the default).
 
 The scaffolder writes a placeholder `priority` titled "Awaiting Content" and an empty rest. **When the operator first asks you to populate or refresh your newspaper, treat the placeholder as empty and write a full sectioned briefing from your IDEA state** using these mappings:
 

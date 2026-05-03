@@ -123,19 +123,6 @@ async function withTempProject<T>(
 	}
 }
 
-// Materialize a minimal valid Genesis mind so listGenesisMinds picks it up.
-function seedValidMind(cwd: string, slug: string): void {
-	const basePath = path.join(cwd, ".pi", "minds");
-	const mindPath = path.join(basePath, slug);
-	const wmPath = path.join(mindPath, ".working-memory");
-	fs.mkdirSync(wmPath, { recursive: true });
-	fs.writeFileSync(path.join(mindPath, "SOUL.md"), "# Soul\n");
-	fs.writeFileSync(path.join(mindPath, "mind-index.md"), "# Index\n");
-	fs.writeFileSync(path.join(wmPath, "memory.md"), "# Memory\n");
-	fs.writeFileSync(path.join(wmPath, "rules.md"), "# Rules\n");
-	fs.writeFileSync(path.join(wmPath, "log.md"), "# Log\n");
-}
-
 describe("observatory extension", () => {
 	test("registers /observatory with completions for list and help only", () => {
 		const { commands } = createHarness();
@@ -299,107 +286,5 @@ describe("observatory extension", () => {
 			await handler({}, ctx);
 		}
 		expect(updates).toEqual([{ key: "observatory", value: undefined }]);
-	});
-
-	test("/observatory:newspaper warns when no Genesis minds exist", async () => {
-		const { commands } = createHarness();
-		const cmd = commands.get("observatory:newspaper");
-		expect(cmd).toBeDefined();
-		await withTempProject(async (cwd) => {
-			const ctx = createContext(cwd);
-			await cmd?.handler("", ctx);
-			expect(ctx.notifications).toHaveLength(1);
-			expect(ctx.notifications[0].type).toBe("warning");
-			expect(ctx.notifications[0].message).toMatch(/No Genesis minds/);
-		});
-	});
-
-	test("/observatory:newspaper scaffolds for a single mind by slug", async () => {
-		const { commands } = createHarness();
-		const cmd = commands.get("observatory:newspaper");
-		await withTempProject(async (cwd) => {
-			seedValidMind(cwd, "jarvis");
-			seedValidMind(cwd, "moneypenny");
-			const ctx = createContext(cwd);
-			await cmd?.handler("jarvis", ctx);
-			expect(ctx.notifications[0].type).toBe("info");
-			expect(ctx.notifications[0].message).toMatch(/jarvis-newspaper/);
-			const lensPath = path.join(
-				cwd,
-				".pi",
-				"observatory",
-				"lenses",
-				"jarvis-newspaper",
-			);
-			expect(fs.existsSync(path.join(lensPath, "lens.json"))).toBe(true);
-			expect(fs.existsSync(path.join(lensPath, "data.json"))).toBe(true);
-			expect(
-				fs.existsSync(
-					path.join(cwd, ".pi", "observatory", "lenses", "moneypenny-newspaper"),
-				),
-			).toBe(false);
-		});
-	});
-
-	test("/observatory:newspaper with no slug scaffolds every mind", async () => {
-		const { commands } = createHarness();
-		const cmd = commands.get("observatory:newspaper");
-		await withTempProject(async (cwd) => {
-			seedValidMind(cwd, "jarvis");
-			seedValidMind(cwd, "moneypenny");
-			const ctx = createContext(cwd);
-			await cmd?.handler("", ctx);
-			expect(ctx.notifications[0].message).toMatch(/Created 2/);
-			expect(
-				fs.existsSync(
-					path.join(
-						cwd,
-						".pi",
-						"observatory",
-						"lenses",
-						"jarvis-newspaper",
-						"lens.json",
-					),
-				),
-			).toBe(true);
-			expect(
-				fs.existsSync(
-					path.join(
-						cwd,
-						".pi",
-						"observatory",
-						"lenses",
-						"moneypenny-newspaper",
-						"lens.json",
-					),
-				),
-			).toBe(true);
-		});
-	});
-
-	test("/observatory:newspaper is idempotent — re-run skips existing", async () => {
-		const { commands } = createHarness();
-		const cmd = commands.get("observatory:newspaper");
-		await withTempProject(async (cwd) => {
-			seedValidMind(cwd, "jarvis");
-			const ctx1 = createContext(cwd);
-			await cmd?.handler("", ctx1);
-			expect(ctx1.notifications[0].message).toMatch(/Created 1/);
-			const ctx2 = createContext(cwd);
-			await cmd?.handler("", ctx2);
-			expect(ctx2.notifications[0].message).toMatch(/Skipped 1/);
-		});
-	});
-
-	test("/observatory:newspaper rejects an unknown mind slug", async () => {
-		const { commands } = createHarness();
-		const cmd = commands.get("observatory:newspaper");
-		await withTempProject(async (cwd) => {
-			seedValidMind(cwd, "jarvis");
-			const ctx = createContext(cwd);
-			await cmd?.handler("nonexistent", ctx);
-			expect(ctx.notifications[0].type).toBe("warning");
-			expect(ctx.notifications[0].message).toMatch(/not found/);
-		});
 	});
 });

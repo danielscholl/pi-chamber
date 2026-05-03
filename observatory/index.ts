@@ -1,13 +1,10 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { listGenesisMinds } from "../mind/core.ts";
 import {
 	DEFAULT_OBSERVATORY_CONFIG,
 	type ObservatoryConfig,
-	type ScaffoldNewspaperResult,
 	discoverLenses,
 	loadObservatoryConfig,
 	resolveLensesRoot,
-	scaffoldNewspaper,
 } from "./core.ts";
 import { ObservatoryOverlay } from "./tui/component.ts";
 
@@ -40,17 +37,6 @@ const LEGACY_NOTE =
 	"/observatory no longer runs an HTTP server. Just /observatory opens the TUI.";
 
 export default function (pi: ExtensionAPI) {
-	pi.registerCommand("observatory:newspaper", {
-		description:
-			"Scaffold a newspaper briefing lens for a Genesis mind (or all minds when no slug is given).",
-		getArgumentCompletions: (prefix: string) =>
-			newspaperArgumentCompletions(prefix),
-		handler: async (args, ctx) => {
-			const command = ctx as ObservatoryCommandContext;
-			await runNewspaperScaffold(args, command);
-		},
-	});
-
 	pi.registerCommand("observatory", {
 		description:
 			"Open the local observatory TUI for Genesis-mind-authored lenses.",
@@ -146,119 +132,6 @@ async function openObservatory(ctx: ObservatoryCommandContext): Promise<void> {
 	}
 }
 
-async function runNewspaperScaffold(
-	rawArgs: string,
-	ctx: ObservatoryCommandContext,
-): Promise<void> {
-	const requestedSlug = (rawArgs || "").trim();
-	let lensesRoot: string;
-	try {
-		lensesRoot = resolveLensesRoot(ctx.cwd, loadObservatoryConfig(ctx.cwd));
-	} catch (error) {
-		notify(
-			ctx,
-			`Cannot resolve lenses root: ${errorMessage(error)}`,
-			"error",
-		);
-		return;
-	}
-
-	let availableMinds: string[];
-	try {
-		availableMinds = listGenesisMinds(ctx.cwd);
-	} catch (error) {
-		notify(ctx, `Cannot list Genesis minds: ${errorMessage(error)}`, "error");
-		return;
-	}
-	if (availableMinds.length === 0) {
-		notify(
-			ctx,
-			"No Genesis minds found. Run /genesis to create one first.",
-			"warning",
-		);
-		return;
-	}
-
-	let targets: string[];
-	if (requestedSlug) {
-		if (!availableMinds.includes(requestedSlug)) {
-			notify(
-				ctx,
-				`Mind "${requestedSlug}" not found. Available: ${availableMinds.join(", ")}.`,
-				"warning",
-			);
-			return;
-		}
-		targets = [requestedSlug];
-	} else {
-		targets = availableMinds;
-	}
-
-	const created: ScaffoldNewspaperResult[] = [];
-	const skipped: ScaffoldNewspaperResult[] = [];
-	const failed: Array<{ mindSlug: string; error: string }> = [];
-	for (const mindSlug of targets) {
-		try {
-			const result = scaffoldNewspaper(lensesRoot, mindSlug);
-			if (result.created) created.push(result);
-			else skipped.push(result);
-		} catch (error) {
-			failed.push({ mindSlug, error: errorMessage(error) });
-		}
-	}
-
-	const parts: string[] = [];
-	if (created.length > 0) {
-		parts.push(
-			`Created ${created.length} newspaper${created.length === 1 ? "" : "s"}: ${created
-				.map((r) => r.lensSlug)
-				.join(", ")}.`,
-		);
-	}
-	if (skipped.length > 0) {
-		parts.push(
-			`Skipped ${skipped.length} (already exist): ${skipped
-				.map((r) => r.lensSlug)
-				.join(", ")}.`,
-		);
-	}
-	if (failed.length > 0) {
-		parts.push(
-			`Failed ${failed.length}: ${failed
-				.map((f) => `${f.mindSlug} (${f.error})`)
-				.join("; ")}.`,
-		);
-	}
-	const message =
-		parts.length > 0 ? parts.join(" ") : "No newspapers to scaffold.";
-	notify(
-		ctx,
-		failed.length > 0 ? message : message,
-		failed.length > 0 ? "error" : "info",
-	);
-}
-
-function newspaperArgumentCompletions(
-	prefix: string,
-): AutocompleteItem[] | null {
-	const query = prefix.trimStart().toLowerCase();
-	let mindSlugs: string[];
-	try {
-		mindSlugs = listGenesisMinds(".");
-	} catch {
-		return null;
-	}
-	const items: AutocompleteItem[] = mindSlugs.map((slug) => ({
-		value: slug,
-		label: slug,
-		description: `Scaffold newspaper for ${slug}`,
-	}));
-	const filtered = items.filter((item) =>
-		item.value.toLowerCase().startsWith(query),
-	);
-	return filtered.length ? filtered : null;
-}
-
 function showLensList(ctx: ObservatoryCommandContext): void {
 	let lensesRoot: string;
 	try {
@@ -293,10 +166,9 @@ function showLensList(ctx: ObservatoryCommandContext): void {
 
 function observatoryHelpText(): string {
 	return [
-		"Usage: /observatory (open the TUI), /observatory list, /observatory:newspaper [<slug>], /observatory help.",
+		"Usage: /observatory (open the TUI), /observatory list, /observatory help.",
 		"",
-		"  /observatory:newspaper        scaffold a newspaper lens for every Genesis mind",
-		"  /observatory:newspaper <slug> scaffold a newspaper lens for one mind",
+		"Genesis seeds a starter newspaper lens for each new mind (set seedLensViews: false in .pi/settings.json to opt out).",
 		"",
 		"Lenses live under .pi/observatory/lenses/<slug>/. Each lens needs two files:",
 		"",

@@ -109,7 +109,7 @@ describe("normalizeVoiceDescription", () => {
 });
 
 describe("config and path helpers", () => {
-	test("loads defaults and merges supported settings while future booleans remain false", () => {
+	test("loads defaults, honors seedLensViews, and pins unwired booleans to false", () => {
 		withTempProject((cwd) => {
 			fs.mkdirSync(path.join(cwd, ".pi"), { recursive: true });
 			fs.writeFileSync(
@@ -121,7 +121,7 @@ describe("config and path helpers", () => {
 						defaultRole: "Reviewer",
 						defaultVoice: "direct",
 						commit: true,
-						seedLensViews: true,
+						seedLensViews: false,
 						bootstrapSkills: true,
 					},
 				}),
@@ -138,6 +138,36 @@ describe("config and path helpers", () => {
 				seedLensViews: false,
 				bootstrapSkills: false,
 			});
+		});
+	});
+
+	test("seedLensViews defaults to true when omitted from settings", () => {
+		withTempProject((cwd) => {
+			fs.mkdirSync(path.join(cwd, ".pi"), { recursive: true });
+			fs.writeFileSync(
+				path.join(cwd, ".pi", "settings.json"),
+				JSON.stringify({
+					genesis: { defaultRole: "Reviewer" },
+				}),
+			);
+
+			const config = loadGenesisConfig(cwd);
+			expect(config.seedLensViews).toBe(true);
+		});
+	});
+
+	test("seedLensViews can be disabled via settings", () => {
+		withTempProject((cwd) => {
+			fs.mkdirSync(path.join(cwd, ".pi"), { recursive: true });
+			fs.writeFileSync(
+				path.join(cwd, ".pi", "settings.json"),
+				JSON.stringify({
+					genesis: { seedLensViews: false },
+				}),
+			);
+
+			const config = loadGenesisConfig(cwd);
+			expect(config.seedLensViews).toBe(false);
 		});
 	});
 

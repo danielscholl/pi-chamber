@@ -323,8 +323,8 @@ export default function (pi: ExtensionAPI) {
 				const lensesRoot = resolveLensesRoot(paths.cwd, observatoryConfig);
 				scaffoldNewspaper(lensesRoot, slug);
 			} catch (error) {
-				// Non-fatal: genesis still proceeds. Operator can run
-				// /observatory:newspaper later to fill in.
+				// Non-fatal: genesis still proceeds. The operator can author
+				// the lens manually under .pi/observatory/lenses/<slug>-newspaper/.
 				notify(
 					ctx,
 					`Genesis could not seed starter newspaper: ${errorMessage(error)}`,

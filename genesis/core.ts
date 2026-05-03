@@ -206,7 +206,10 @@ export function loadGenesisConfig(cwd: string): GenesisConfig {
 				? genesis.defaultVoice
 				: config.defaultVoice,
 		commit: false,
-		seedLensViews: false,
+		seedLensViews:
+			typeof genesis.seedLensViews === "boolean"
+				? genesis.seedLensViews
+				: config.seedLensViews,
 		bootstrapSkills: false,
 	};
 }

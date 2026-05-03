@@ -5,7 +5,7 @@ Pi extension package providing four composable features for the Pi coding agent:
 - **Genesis** (`/genesis`) — generate durable, project-local agent identities ("minds") under `.pi/minds/<slug>/` and runnable shims under `.pi/agents/<slug>.md`.
 - **Mind mode** (`/mind <slug>`) — direct-chat into a generated mind from the main session.
 - **Room** (`/room`) — multi-mind orchestration with concurrent / sequential / group-chat strategies, director shortcuts, saved rooms, and live transcripts.
-- **Observatory** (`/observatory`) — in-terminal TUI lens viewer that renders mind-authored briefing and status-board lenses, with a built-in Dashboard summary view. Briefing lenses can use a sectioned page layout (priority, metrics, activity, lists, narrative, details) or fall back to a flat card grid. `/observatory:newspaper [<slug>]` scaffolds a starter newspaper lens for one or every Genesis mind.
+- **Observatory** (`/observatory`) — in-terminal TUI lens viewer that renders mind-authored briefing and status-board lenses, with a built-in Dashboard summary view. Briefing lenses can use a sectioned page layout (priority, metrics, activity, lists, narrative, details) or fall back to a flat card grid. `/genesis` seeds a starter newspaper lens for each new mind.
 
 ## Install
 

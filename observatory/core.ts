@@ -356,11 +356,10 @@ function errorMessage(error: unknown): string {
 // ---------------------------------------------------------------------------
 // Newspaper scaffolding
 //
-// /observatory:newspaper [<slug>] writes a sectioned-briefing lens for one
-// Genesis mind (or every mind when no slug is given). The lens is a minimal
-// page with a placeholder priority — enough for the operator to see the lens
-// in the sidebar immediately. The mind populates the rest later by writing
-// its own data.json.
+// Used by /genesis (when seedLensViews is on) to create a starter newspaper
+// lens for the new mind. The lens is a minimal page with a placeholder
+// priority — enough for the operator to see the lens in the sidebar
+// immediately. The mind populates the rest later when asked.
 // ---------------------------------------------------------------------------
 
 export interface ScaffoldNewspaperResult {
@@ -405,7 +404,7 @@ export function newspaperData(mindSlug: string): unknown {
 			body: `Ask ${mindSlug} to populate this newspaper. The mind reads its IDEA notes and updates priority, metrics, activity, and narrative sections.`,
 			severity: "info",
 		},
-		activity: ["Newspaper scaffolded by /observatory:newspaper"],
+		activity: ["Newspaper scaffolded by /genesis"],
 	};
 }
 
