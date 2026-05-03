@@ -1,7 +1,4 @@
-import {
-	type StatusTier,
-	tierGlyph,
-} from "../render-status-board.ts";
+import { type StatusTier, tierGlyph } from "../status.ts";
 import { type Colorize, type ThemeColorKey, noColorize } from "./types.ts";
 
 // Single-line status pill: glyph + label. No padding — caller composes.

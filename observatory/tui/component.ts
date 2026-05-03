@@ -7,6 +7,7 @@ import {
 	type DiscoveryEntry,
 	type LensManifest,
 	discoverLenses,
+	lensesActivitySummary,
 	readLensData,
 } from "../core.ts";
 import { listGenesisMinds } from "../../mind/core.ts";
@@ -17,10 +18,9 @@ import {
 	clampSidebarScroll,
 	renderSidebar,
 } from "./render-sidebar.ts";
-import { normalizeStatusBoard } from "./render-status-board.ts";
+import { normalizeStatusBoard } from "./status.ts";
 import {
 	type DashboardActivity,
-	lensesActivitySummary,
 	renderDashboard,
 } from "./render-dashboard.ts";
 import { renderBriefing } from "./render-briefing.ts";
@@ -35,7 +35,10 @@ import {
 	type ObservatoryViewState,
 	clearNotification,
 	createObservatoryViewState,
+	invalidateActivityCache,
+	invalidateMindsCache,
 	notificationIsExpired,
+	readTtlCache,
 	setEntries,
 	setLensData,
 	setNotification,
@@ -46,7 +49,7 @@ import { type LensWatcher, type WatcherChange, startLensWatcher } from "./watche
 import type { Colorize, ThemeColorKey } from "./widgets/types.ts";
 
 const FOOTER_LIST = "j/k navigate · enter view · r refresh · ? help · q quit";
-const FOOTER_DETAIL = "j/k scroll · gg/G top/bottom · e expand · esc back · q quit";
+const FOOTER_DETAIL = "j/k scroll · gg/G top/bottom · e expand (flat) · esc back · q quit";
 const FOOTER_HELP = "? close help · q quit";
 
 const MIN_WIDTH = 50;
@@ -54,16 +57,15 @@ const MAX_WIDTH = 140;
 const MIN_HEIGHT = 14;
 const MAX_HEIGHT = 50;
 
+const ACTIVITY_TTL_MS = 2_000;
+const MINDS_TTL_MS = 5_000;
+
 export class ObservatoryOverlay implements Component, Focusable {
 	focused = true;
 	private viewState: ObservatoryViewState;
 	private watcher: LensWatcher | null = null;
 	private lastBodyLineCount = 0;
 	private lastViewportHeight = MIN_HEIGHT;
-	private cachedActivity: DashboardActivity | null = null;
-	private cachedActivityAt = 0;
-	private cachedMinds: string[] | null = null;
-	private cachedMindsAt = 0;
 	private notificationFlushTimer: ReturnType<typeof setTimeout> | null = null;
 	private widgetColorize: Colorize;
 
@@ -139,7 +141,15 @@ export class ObservatoryOverlay implements Component, Focusable {
 	handleInput(data: string): void {
 		handleObservatoryInput(this.viewState, data, {
 			requestRender: () => this.tui.requestRender(),
-			exit: () => this.done(),
+			exit: () => {
+				// pi-tui does not call dispose() on non-overlay custom components
+				// when their done() resolver fires. Tear down the watcher and
+				// pending notification timer ourselves before the runtime drops
+				// our reference, otherwise every /observatory open/close cycle
+				// leaks an fs.watch handle.
+				this.dispose();
+				this.done();
+			},
 			refresh: () => this.refresh(),
 			bodyContentLines: () => this.lastBodyLineCount,
 			viewportHeight: () => this.lastViewportHeight,
@@ -147,10 +157,8 @@ export class ObservatoryOverlay implements Component, Focusable {
 	}
 
 	invalidate(): void {
-		this.cachedActivity = null;
-		this.cachedActivityAt = 0;
-		this.cachedMinds = null;
-		this.cachedMindsAt = 0;
+		invalidateActivityCache(this.viewState);
+		invalidateMindsCache(this.viewState);
 	}
 
 	dispose(): void {
@@ -245,19 +253,37 @@ export class ObservatoryOverlay implements Component, Focusable {
 	}
 
 	private refreshSidebarItems(): void {
-		const now = Date.now();
-		if (!this.cachedMinds || now - this.cachedMindsAt > 5_000) {
-			this.cachedMinds = safeListMinds(this.cwd);
-			this.cachedMindsAt = now;
-		}
+		const minds = this.readMinds();
 		setSidebarItems(
 			this.viewState,
 			buildSidebarItems(
 				this.viewState.entries,
-				this.cachedMinds ?? [],
+				minds,
 				this.collectRoomSidebarEntries(),
 			),
 		);
+	}
+
+	private readMinds(): string[] {
+		const result = readTtlCache(
+			this.viewState.mindsCache,
+			MINDS_TTL_MS,
+			Date.now(),
+			() => safeListMinds(this.cwd),
+		);
+		this.viewState.mindsCache = result.cache;
+		return result.value;
+	}
+
+	private readActivity(): DashboardActivity | null {
+		const result = readTtlCache(
+			this.viewState.activityCache,
+			ACTIVITY_TTL_MS,
+			Date.now(),
+			() => lensesActivitySummary(this.lensesRoot),
+		);
+		this.viewState.activityCache = result.cache;
+		return result.value;
 	}
 
 	private collectRoomSidebarEntries(): RoomSidebarEntry[] {
@@ -275,15 +301,8 @@ export class ObservatoryOverlay implements Component, Focusable {
 	}
 
 	private collectDashboardData() {
-		const now = Date.now();
-		if (!this.cachedMinds || now - this.cachedMindsAt > 5_000) {
-			this.cachedMinds = safeListMinds(this.cwd);
-			this.cachedMindsAt = now;
-		}
-		if (!this.cachedActivity || now - this.cachedActivityAt > 2_000) {
-			this.cachedActivity = lensesActivitySummary(this.lensesRoot);
-			this.cachedActivityAt = now;
-		}
+		const minds = this.readMinds();
+		const activity = this.readActivity();
 		const roomEntry = this.viewState.entries.find(
 			(e) => e.id === "room" && e.status === "ok",
 		);
@@ -295,9 +314,9 @@ export class ObservatoryOverlay implements Component, Focusable {
 		return {
 			entries: this.viewState.entries,
 			roomData,
-			minds: this.cachedMinds ?? [],
-			activity: this.cachedActivity,
-			now,
+			minds,
+			activity,
+			now: Date.now(),
 		};
 	}
 
@@ -325,14 +344,16 @@ export class ObservatoryOverlay implements Component, Focusable {
 		if (kind === "discover") {
 			setEntries(this.viewState, this.safeDiscover());
 			this.viewState.lensDataCache.clear();
-			this.cachedActivity = null;
-			this.cachedActivityAt = 0;
+			invalidateActivityCache(this.viewState);
+			// New lens directories are typically created alongside new minds
+			// (Genesis seeds both). Drop the mind cache so the sidebar reflects
+			// the new mind on the next render rather than waiting out the TTL.
+			invalidateMindsCache(this.viewState);
 		} else if (kind === "data") {
 			if (this.viewState.selection.kind === "lens") {
 				this.viewState.lensDataCache.delete(this.viewState.selection.lensId);
 			}
-			this.cachedActivity = null;
-			this.cachedActivityAt = 0;
+			invalidateActivityCache(this.viewState);
 		}
 		this.tui.requestRender();
 	}
@@ -340,10 +361,8 @@ export class ObservatoryOverlay implements Component, Focusable {
 	private refresh(): void {
 		setEntries(this.viewState, this.safeDiscover());
 		this.viewState.lensDataCache.clear();
-		this.cachedActivity = null;
-		this.cachedActivityAt = 0;
-		this.cachedMinds = null;
-		this.cachedMindsAt = 0;
+		invalidateActivityCache(this.viewState);
+		invalidateMindsCache(this.viewState);
 		this.notify("Refreshed.", "info");
 		this.tui.requestRender();
 	}

@@ -14,6 +14,7 @@ import {
 	ALLOWED_LENS_KINDS,
 	DEFAULT_OBSERVATORY_CONFIG,
 	discoverLenses,
+	lensesActivitySummary,
 	loadObservatoryConfig,
 	newspaperLensName,
 	newspaperLensSlug,
@@ -565,5 +566,39 @@ describe("scaffoldNewspaper", () => {
 			expect(() => scaffoldNewspaper(lensesRoot, "Bad Slug")).toThrow();
 			expect(() => scaffoldNewspaper(lensesRoot, "")).toThrow();
 		});
+	});
+});
+
+describe("lensesActivitySummary", () => {
+	test("returns null when the root does not exist", () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "lenses-activity-"));
+		try {
+			expect(lensesActivitySummary(path.join(tmp, "missing"))).toBeNull();
+		} finally {
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
+	test("returns the most recently modified non-manifest file", () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "lenses-activity-"));
+		try {
+			const lensesRoot = path.join(tmp, "lenses");
+			fs.mkdirSync(path.join(lensesRoot, "ops"), { recursive: true });
+			fs.mkdirSync(path.join(lensesRoot, "room"), { recursive: true });
+			fs.writeFileSync(path.join(lensesRoot, "ops", "lens.json"), "{}");
+			fs.writeFileSync(path.join(lensesRoot, "ops", "data.json"), "{}");
+			fs.writeFileSync(path.join(lensesRoot, "room", "lens.json"), "{}");
+			fs.writeFileSync(path.join(lensesRoot, "room", "data.json"), "{}");
+
+			const opsData = path.join(lensesRoot, "ops", "data.json");
+			const roomData = path.join(lensesRoot, "room", "data.json");
+			fs.utimesSync(opsData, new Date(2025, 0, 1), new Date(2025, 0, 1));
+			fs.utimesSync(roomData, new Date(2026, 0, 1), new Date(2026, 0, 1));
+
+			const summary = lensesActivitySummary(lensesRoot);
+			expect(summary?.lensId).toBe("room");
+		} finally {
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
 	});
 });

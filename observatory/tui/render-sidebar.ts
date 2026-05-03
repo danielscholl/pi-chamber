@@ -1,5 +1,5 @@
 import type { DiscoveryEntry } from "../core.ts";
-import type { StatusTier } from "./render-status-board.ts";
+import type { StatusTier } from "./status.ts";
 import { tierColorKey } from "./widgets/status-pill.ts";
 import { padToWidth, truncateToWidth } from "./widgets/text.ts";
 import { type Colorize, type ThemeColorKey, noColorize } from "./widgets/types.ts";
@@ -81,7 +81,10 @@ export function buildSidebarItems(
 		items.push({ kind: "separator" });
 		items.push({ kind: "group", label: "Minds" });
 		for (const mind of minds) {
-			items.push({ kind: "mind-status", label: mind, status: "ready" });
+			// Mind activity is not yet wired through; show the slug only.
+			// When per-mind state lands (room participation, last-active),
+			// populate `status` here.
+			items.push({ kind: "mind-status", label: mind, status: "" });
 		}
 	}
 	items.push({ kind: "separator" });
@@ -128,13 +131,6 @@ export function findSelectableIndex(
 		}
 	}
 	return -1;
-}
-
-export function visibleSidebarHeight(
-	height: number,
-	itemCount: number,
-): number {
-	return Math.max(1, Math.min(height, itemCount));
 }
 
 export function clampSidebarScroll(

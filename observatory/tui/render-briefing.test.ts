@@ -40,7 +40,7 @@ describe("renderBriefing", () => {
 		expect(renderBriefing({}, 60).join("\n")).toMatch(/no fields/);
 	});
 
-	test("renders aligned key/value rows", () => {
+	test("renders flat objects as a card grid containing every label and value", () => {
 		const out = renderBriefing(
 			{
 				active_minds: 3,
@@ -55,24 +55,7 @@ describe("renderBriefing", () => {
 		expect(joined).toContain("Ship the TUI rewrite");
 	});
 
-	test("truncates long values when expandValues is false", () => {
-		const long = "a really long sentence ".repeat(20);
-		const out = renderBriefing({ note: long }, 40);
-		expect(out.length).toBe(1);
-		expect(out[0].length).toBeLessThanOrEqual(40);
-		expect(out[0].endsWith("…")).toBe(true);
-	});
-
-	test("wraps long values when expandValues is true", () => {
-		const long = "alpha bravo charlie delta echo foxtrot golf hotel india";
-		const out = renderBriefing({ note: long }, 40, true);
-		expect(out.length).toBeGreaterThan(1);
-		for (const line of out) {
-			expect(line.length).toBeLessThanOrEqual(40);
-		}
-	});
-
-	test("each line is bounded by width", () => {
+	test("each line is bounded by width even at narrow widths", () => {
 		const out = renderBriefing(
 			{
 				k1: 1,
@@ -84,6 +67,29 @@ describe("renderBriefing", () => {
 		for (const line of out) {
 			expect(line.length).toBeLessThanOrEqual(32);
 		}
+	});
+
+	test("expand=true wraps long flat values across multiple lines", () => {
+		const long = "alpha bravo charlie delta echo foxtrot golf hotel india";
+		const out = renderBriefing({ note: long }, 40, true);
+		// details-body wrap mode should produce multiple lines for a long
+		// single field, and every line stays within the budget.
+		expect(out.length).toBeGreaterThan(1);
+		for (const line of out) {
+			expect(line.length).toBeLessThanOrEqual(40);
+		}
+		// The full value (split across lines, joined) still contains every
+		// word — no terminal ellipsis truncation has dropped content.
+		const joined = out.join(" ");
+		expect(joined).toContain("foxtrot");
+		expect(joined).toContain("india");
+	});
+
+	test("expand=false (default) keeps the flat card grid layout", () => {
+		const out = renderBriefing({ active_minds: 3 }, 60);
+		const joined = out.join("\n");
+		// Cards are bordered; the expanded details-body layout is not.
+		expect(joined).toMatch(/[╭╰]/);
 	});
 
 	test("routes to page renderer when sectioned data + manifest are provided", () => {

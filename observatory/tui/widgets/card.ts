@@ -1,5 +1,5 @@
 import { type Colorize, noColorize } from "./types.ts";
-import { padToWidth, truncateToWidth, visibleWidth } from "./text.ts";
+import { padToWidth, truncateToWidth } from "./text.ts";
 
 // Card widget: emoji + dim label + value, ≥ 4 lines, all width-padded.
 // Layout:
@@ -49,9 +49,4 @@ export function card(input: CardInput): string[] {
 	const valueRow = `${border(VERTICAL)} ${valueLine} ${border(VERTICAL)}`;
 
 	return [top, labelRow, valueRow, bottom];
-}
-
-// Internal helper for tests / callers wanting the rendered visible width
-export function cardVisibleWidth(line: string): number {
-	return visibleWidth(line);
 }

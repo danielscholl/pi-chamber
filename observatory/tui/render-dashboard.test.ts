@@ -1,21 +1,8 @@
 // biome-ignore lint/suspicious/noTsIgnore: Bun provides this module at test runtime.
 // @ts-ignore
 import { describe, expect, test } from "bun:test";
-// biome-ignore lint/suspicious/noTsIgnore: Bun tests run with Node built-ins available.
-// @ts-ignore
-import * as fs from "node:fs";
-// biome-ignore lint/suspicious/noTsIgnore: Bun tests run with Node built-ins available.
-// @ts-ignore
-import os from "node:os";
-// biome-ignore lint/suspicious/noTsIgnore: Bun tests run with Node built-ins available.
-// @ts-ignore
-import path from "node:path";
 import type { DiscoveryEntry } from "../core.ts";
-import {
-	formatRelativeTime,
-	lensesActivitySummary,
-	renderDashboard,
-} from "./render-dashboard.ts";
+import { formatRelativeTime, renderDashboard } from "./render-dashboard.ts";
 import { visibleWidth } from "./widgets/text.ts";
 
 function entry(id: string, kind: "briefing" | "status-board" = "briefing"): DiscoveryEntry {
@@ -164,39 +151,5 @@ describe("formatRelativeTime", () => {
 
 	test("clamps negative deltas", () => {
 		expect(formatRelativeTime(-5_000)).toBe("just now");
-	});
-});
-
-describe("lensesActivitySummary", () => {
-	test("returns null when the root does not exist", () => {
-		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "dashboard-activity-"));
-		try {
-			expect(lensesActivitySummary(path.join(tmp, "missing"))).toBeNull();
-		} finally {
-			fs.rmSync(tmp, { recursive: true, force: true });
-		}
-	});
-
-	test("returns the most recently modified non-manifest file", () => {
-		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "dashboard-activity-"));
-		try {
-			const lensesRoot = path.join(tmp, "lenses");
-			fs.mkdirSync(path.join(lensesRoot, "ops"), { recursive: true });
-			fs.mkdirSync(path.join(lensesRoot, "room"), { recursive: true });
-			fs.writeFileSync(path.join(lensesRoot, "ops", "lens.json"), "{}");
-			fs.writeFileSync(path.join(lensesRoot, "ops", "data.json"), "{}");
-			fs.writeFileSync(path.join(lensesRoot, "room", "lens.json"), "{}");
-			fs.writeFileSync(path.join(lensesRoot, "room", "data.json"), "{}");
-
-			const opsData = path.join(lensesRoot, "ops", "data.json");
-			const roomData = path.join(lensesRoot, "room", "data.json");
-			fs.utimesSync(opsData, new Date(2025, 0, 1), new Date(2025, 0, 1));
-			fs.utimesSync(roomData, new Date(2026, 0, 1), new Date(2026, 0, 1));
-
-			const summary = lensesActivitySummary(lensesRoot);
-			expect(summary?.lensId).toBe("room");
-		} finally {
-			fs.rmSync(tmp, { recursive: true, force: true });
-		}
 	});
 });

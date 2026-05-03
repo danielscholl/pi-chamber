@@ -354,6 +354,63 @@ function errorMessage(error: unknown): string {
 }
 
 // ---------------------------------------------------------------------------
+// Lens activity (most-recently-modified data file across all lenses)
+//
+// Used by the Dashboard's Activity panel. Pure I/O lives here in `core.ts`
+// so render-* modules can stay (data, width) → string[].
+// ---------------------------------------------------------------------------
+
+export interface DashboardActivity {
+	lensId: string;
+	mtimeMs: number;
+}
+
+export function lensesActivitySummary(
+	lensesRoot: string,
+): DashboardActivity | null {
+	if (!existsSync(lensesRoot)) return null;
+	let entries: string[];
+	try {
+		entries = readdirSync(lensesRoot);
+	} catch {
+		return null;
+	}
+	let best: DashboardActivity | null = null;
+	for (const id of entries) {
+		if (id.startsWith(".")) continue;
+		const folder = path.join(lensesRoot, id);
+		let stat: ReturnType<typeof statSync>;
+		try {
+			stat = statSync(folder);
+		} catch {
+			continue;
+		}
+		if (!stat.isDirectory()) continue;
+		let files: string[];
+		try {
+			files = readdirSync(folder);
+		} catch {
+			continue;
+		}
+		for (const file of files) {
+			if (file === LENS_MANIFEST_FILE) continue;
+			const filePath = path.join(folder, file);
+			let s: ReturnType<typeof statSync>;
+			try {
+				s = statSync(filePath);
+			} catch {
+				continue;
+			}
+			if (!s.isFile()) continue;
+			if (!best || s.mtimeMs > best.mtimeMs) {
+				best = { lensId: id, mtimeMs: s.mtimeMs };
+			}
+		}
+	}
+	return best;
+}
+
+// ---------------------------------------------------------------------------
 // Newspaper scaffolding
 //
 // Used by /genesis (when seedLensViews is on) to create a starter newspaper

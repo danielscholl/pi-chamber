@@ -140,7 +140,7 @@ describe("refresh and toggles", () => {
 		expect(state.lensDataCache.size).toBe(0);
 	});
 
-	test("e toggles expandValues", () => {
+	test("e toggles expandValues for flat briefings", () => {
 		const state = createObservatoryViewState();
 		const ctx = makeCtx();
 		expect(state.expandValues).toBe(false);

@@ -1,23 +1,10 @@
-// biome-ignore lint/suspicious/noTsIgnore: Project runtime provides Node built-ins; this workspace does not install @types/node.
-// @ts-ignore
-import { existsSync, readdirSync, statSync } from "node:fs";
-// biome-ignore lint/suspicious/noTsIgnore: Project runtime provides Node built-ins; this workspace does not install @types/node.
-// @ts-ignore
-import path from "node:path";
-import type { DiscoveryEntry } from "../core.ts";
-import {
-	normalizeStatusBoard,
-	statusTier,
-	tierGlyph,
-} from "./render-status-board.ts";
+import type { DashboardActivity, DiscoveryEntry } from "../core.ts";
+import { normalizeStatusBoard, statusTier, tierGlyph } from "./status.ts";
 import { type Colorize, noColorize } from "./widgets/types.ts";
 import { grid } from "./widgets/grid.ts";
 import { panel } from "./widgets/panel.ts";
 
-export interface DashboardActivity {
-	lensId: string;
-	mtimeMs: number;
-}
+export type { DashboardActivity };
 
 export interface DashboardData {
 	entries: DiscoveryEntry[];
@@ -149,49 +136,4 @@ export function formatRelativeTime(deltaMs: number): string {
 	if (hr < 24) return `${hr}h ago`;
 	const day = Math.floor(hr / 24);
 	return `${day}d ago`;
-}
-
-export function lensesActivitySummary(
-	lensesRoot: string,
-): DashboardActivity | null {
-	if (!existsSync(lensesRoot)) return null;
-	let entries: string[];
-	try {
-		entries = readdirSync(lensesRoot);
-	} catch {
-		return null;
-	}
-	let best: DashboardActivity | null = null;
-	for (const id of entries) {
-		if (id.startsWith(".")) continue;
-		const folder = path.join(lensesRoot, id);
-		let stat: ReturnType<typeof statSync>;
-		try {
-			stat = statSync(folder);
-		} catch {
-			continue;
-		}
-		if (!stat.isDirectory()) continue;
-		let files: string[];
-		try {
-			files = readdirSync(folder);
-		} catch {
-			continue;
-		}
-		for (const file of files) {
-			if (file === "lens.json") continue;
-			const filePath = path.join(folder, file);
-			let s: ReturnType<typeof statSync>;
-			try {
-				s = statSync(filePath);
-			} catch {
-				continue;
-			}
-			if (!s.isFile()) continue;
-			if (!best || s.mtimeMs > best.mtimeMs) {
-				best = { lensId: id, mtimeMs: s.mtimeMs };
-			}
-		}
-	}
-	return best;
 }

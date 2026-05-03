@@ -1,6 +1,6 @@
 import type { LensManifest } from "../core.ts";
 import type { BriefingPage, ListSection } from "../page.ts";
-import { statusTier } from "./render-status-board.ts";
+import { statusTier } from "./status.ts";
 import { detailsBody } from "./widgets/details-body.ts";
 import { inlineList } from "./widgets/inline-list.ts";
 import { linesBody } from "./widgets/lines-body.ts";

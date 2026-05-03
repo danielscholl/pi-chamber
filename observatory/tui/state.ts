@@ -1,10 +1,23 @@
-import type { DiscoveryEntry, LensDataResult } from "../core.ts";
+import type {
+	DashboardActivity,
+	DiscoveryEntry,
+	LensDataResult,
+} from "../core.ts";
 import {
 	type SidebarItem,
 	buildSidebarItems,
 	findSelectableIndex,
 	isSelectableItem,
 } from "./render-sidebar.ts";
+
+// Single-value TTL cache. Both the activity scan and the mind-list read
+// share the same shape, so `readTtlCache` is the only fetch helper a
+// caller needs. Caches live on viewState (not on the component) so
+// invalidation has one home.
+export interface TtlCache<T> {
+	value: T;
+	fetchedAt: number;
+}
 
 export type ObservatorySelection =
 	| { kind: "dashboard" }
@@ -24,12 +37,18 @@ export interface ObservatoryViewState {
 	mode: ObservatoryMode;
 	bodyScrollOffset: number;
 	sidebarScrollOffset: number;
+	// `e` toggle. Affects flat-briefing rendering only: when true, long
+	// values wrap across lines via the details-body layout instead of being
+	// truncated into single-line cards. Sectioned-briefing pages always
+	// expand their details-body, so the toggle is a no-op there.
 	expandValues: boolean;
 	notification: ObservatoryNotification | null;
 	pendingG: boolean;
 	entries: DiscoveryEntry[];
 	sidebarItems: SidebarItem[];
 	lensDataCache: Map<string, LensDataResult>;
+	activityCache: TtlCache<DashboardActivity | null> | null;
+	mindsCache: TtlCache<string[]> | null;
 	lastRefreshAt: number;
 }
 
@@ -48,10 +67,33 @@ export function createObservatoryViewState(
 		entries,
 		sidebarItems: [],
 		lensDataCache: new Map(),
+		activityCache: null,
+		mindsCache: null,
 		lastRefreshAt: Date.now(),
 	};
 	setSidebarItems(state, buildSidebarItems(entries, [], []));
 	return state;
+}
+
+export function readTtlCache<T>(
+	cache: TtlCache<T> | null,
+	ttlMs: number,
+	now: number,
+	fetcher: () => T,
+): { cache: TtlCache<T>; value: T } {
+	if (cache && now - cache.fetchedAt < ttlMs) {
+		return { cache, value: cache.value };
+	}
+	const value = fetcher();
+	return { cache: { value, fetchedAt: now }, value };
+}
+
+export function invalidateActivityCache(state: ObservatoryViewState): void {
+	state.activityCache = null;
+}
+
+export function invalidateMindsCache(state: ObservatoryViewState): void {
+	state.mindsCache = null;
 }
 
 export function sidebarItemCount(state: ObservatoryViewState): number {

@@ -10,7 +10,7 @@ export function renderHelp(width: number): string[] {
 			"  h, ←, esc   leave detail (or exit overlay)",
 			"  q           exit overlay",
 			"  r           refresh: re-discover and reload data",
-			"  e           toggle full / truncated values (briefing)",
+			"  e           expand long values (flat briefings only)",
 			"  g g         scroll body to top",
 			"  G           scroll body to bottom",
 			"  ctrl-d / u  half-page scroll in detail",

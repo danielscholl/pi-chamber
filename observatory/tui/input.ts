@@ -5,7 +5,6 @@ import {
 	invalidateLensData,
 	setMode,
 	setSelectedIndex,
-	sidebarItemCount,
 } from "./state.ts";
 
 export interface ObservatoryInputContext {
@@ -81,6 +80,8 @@ export function handleObservatoryInput(
 	}
 
 	if (data === "e") {
+		// Flat-briefing only: switch between truncated cards (default) and
+		// wrapped key/value layout that lets the operator read full values.
 		state.expandValues = !state.expandValues;
 		ctx.requestRender();
 		return { consumed: true };
@@ -190,6 +191,3 @@ function clampScroll(value: number, ctx: ObservatoryInputContext): number {
 	if (value > max) return max;
 	return value;
 }
-
-// Re-export sidebarItemCount for tests that want to assert against state shape.
-export { sidebarItemCount };
