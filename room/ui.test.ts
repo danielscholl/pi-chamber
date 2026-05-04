@@ -157,7 +157,141 @@ describe("renderParticipantBarLines", () => {
 		});
 		expect(lines[0]).toContain("(mod)");
 	});
+
+	test("renders an animated spinner glyph for active participants", () => {
+		const frameZero = renderParticipantBarLines({
+			active: true,
+			mode: "open-floor",
+			participants: [
+				{
+					slug: "ariadne",
+					role: "speaker",
+					status: "speaking",
+					paletteIndex: 0,
+				},
+			],
+			spinnerFrame: 0,
+		});
+		const frameOne = renderParticipantBarLines({
+			active: true,
+			mode: "open-floor",
+			participants: [
+				{
+					slug: "ariadne",
+					role: "speaker",
+					status: "speaking",
+					paletteIndex: 0,
+				},
+			],
+			spinnerFrame: 1,
+		});
+		// Different frame indices must produce different rendered glyphs so
+		// the bar visibly animates while a mind is working.
+		expect(frameZero[0]).not.toBe(frameOne[0]);
+		// Both contain the slug, identifying which mind is working.
+		expect(frameZero[0]).toContain("ariadne");
+		expect(frameOne[0]).toContain("ariadne");
+	});
+
+	test("appends current tool name only while a participant is active", () => {
+		const active = renderParticipantBarLines({
+			active: true,
+			mode: "open-floor",
+			participants: [
+				{
+					slug: "jarvis",
+					role: "speaker",
+					status: "speaking",
+					paletteIndex: 0,
+					elapsedMs: 23_000,
+					currentTool: "bash",
+				},
+			],
+			spinnerFrame: 5,
+		});
+		expect(active[0]).toContain("0:23");
+		expect(active[0]).toContain("bash");
+
+		// A done participant must not show currentTool even if leaked in the
+		// view — defensive against stale state.
+		const done = renderParticipantBarLines({
+			active: true,
+			mode: "open-floor",
+			participants: [
+				{
+					slug: "jarvis",
+					role: "speaker",
+					status: "done",
+					paletteIndex: 0,
+					currentTool: "bash",
+				},
+			],
+		});
+		expect(done[0]).not.toContain("bash");
+	});
+
+	test("appends elapsed time only for active participants", () => {
+		const lines = renderParticipantBarLines({
+			active: true,
+			mode: "open-floor",
+			participants: [
+				{
+					slug: "ariadne",
+					role: "speaker",
+					status: "speaking",
+					paletteIndex: 0,
+					elapsedMs: 8_000,
+				},
+				{
+					slug: "mycroft",
+					role: "speaker",
+					status: "done",
+					paletteIndex: 1,
+					elapsedMs: 12_000, // ignored for done
+				},
+			],
+			spinnerFrame: 3,
+		});
+		// Active speaker shows mm:ss elapsed
+		expect(lines[0]).toContain("0:08");
+		// Done speaker does NOT include elapsed (would be 0:12 if leaked)
+		expect(lines[0]).not.toContain("0:12");
+	});
+
+	test("uses distinct glyphs for done vs ready vs error states", () => {
+		const done = renderParticipantBarLines({
+			active: true,
+			mode: "open-floor",
+			participants: [
+				{ slug: "a", role: "speaker", status: "done", paletteIndex: 0 },
+			],
+		});
+		const ready = renderParticipantBarLines({
+			active: true,
+			mode: "open-floor",
+			participants: [
+				{ slug: "a", role: "speaker", status: "ready", paletteIndex: 0 },
+			],
+		});
+		const errored = renderParticipantBarLines({
+			active: true,
+			mode: "open-floor",
+			participants: [
+				{ slug: "a", role: "speaker", status: "error", paletteIndex: 0 },
+			],
+		});
+		// Each state uses a different glyph character so the eye reads state
+		// without parsing color alone.
+		expect(stripAnsi(done[0])).toContain("✓");
+		expect(stripAnsi(ready[0])).toContain("◌");
+		expect(stripAnsi(errored[0])).toContain("✕");
+	});
 });
+
+function stripAnsi(s: string): string {
+	// biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI strip helper.
+	return s.replace(/\x1b\[[0-9;]*m/g, "");
+}
 
 describe("message renderers", () => {
 	test("userRoomMessageRenderer wraps content in a Box", () => {
@@ -189,7 +323,7 @@ describe("message renderers", () => {
 		expect((children as unknown[]).length).toBeGreaterThanOrEqual(2);
 	});
 
-	test("mindSpeechRenderer collapses long unexpanded messages", () => {
+	test("mindSpeechRenderer collapses long unexpanded completed messages", () => {
 		const longBody = "first sentence.\n" + "filler ".repeat(120);
 		const component = mindSpeechRenderer(
 			{
@@ -199,6 +333,9 @@ describe("message renderers", () => {
 					mode: "concurrent",
 					role: "speaker",
 					paletteIndex: 0,
+					// durationMs marks the turn as completed; in-flight turns
+					// auto-expand so the operator can read the live stream.
+					durationMs: 1234,
 				},
 			},
 			{ expanded: false },
@@ -209,6 +346,29 @@ describe("message renderers", () => {
 		expect(children?.length).toBeGreaterThan(0);
 		const rendered = JSON.stringify(children);
 		expect(rendered).toContain("Ctrl+O to expand");
+	});
+
+	test("mindSpeechRenderer auto-expands in-flight (still streaming) messages", () => {
+		const longBody = "first sentence.\n" + "filler ".repeat(120);
+		const component = mindSpeechRenderer(
+			{
+				content: longBody,
+				details: {
+					slug: "ariadne",
+					mode: "concurrent",
+					role: "speaker",
+					paletteIndex: 0,
+					// no durationMs — turn is in-flight
+				},
+			},
+			{ expanded: false },
+			fakeTheme as never,
+		);
+		const rendered = JSON.stringify(
+			(component as { children?: unknown[] }).children,
+		);
+		expect(rendered).not.toContain("Ctrl+O to expand");
+		expect(rendered).toContain("filler filler");
 	});
 
 	test("mindSpeechRenderer always renders synthesis turns fully (no collapse)", () => {

@@ -37,6 +37,29 @@ export const MIND_PALETTE: ReadonlyArray<{ name: string; rgb: [number, number, n
 
 const MODERATOR_DECISION_RGB: [number, number, number] = [180, 160, 200];
 const ROUND_METRICS_RGB: [number, number, number] = [120, 100, 140];
+export const ROOM_NOTICE_INFO_RGB: [number, number, number] = [140, 160, 180];
+export const ROOM_NOTICE_WARNING_RGB: [number, number, number] = [220, 180, 100];
+
+const PARTICIPANT_DONE_RGB: [number, number, number] = [120, 145, 130];
+const PARTICIPANT_READY_RGB: [number, number, number] = [110, 110, 130];
+const PARTICIPANT_ERROR_RGB: [number, number, number] = [220, 100, 90];
+
+/**
+ * Braille dot rotation. Used as the active-state glyph in the participant
+ * bar. The bar advances `spinnerFrame` while any mind is thinking/speaking.
+ */
+export const PARTICIPANT_SPINNER_FRAMES = [
+	"⠋",
+	"⠙",
+	"⠹",
+	"⠸",
+	"⠼",
+	"⠴",
+	"⠦",
+	"⠧",
+	"⠇",
+	"⠏",
+] as const;
 
 const USER_ROOM_MESSAGE_CUSTOM_TYPE = "room-user-message";
 const MIND_SPEECH_CUSTOM_TYPE = "room-mind-speech";
@@ -57,6 +80,13 @@ export type ParticipantStateView = {
 	role: "speaker" | "moderator";
 	status: ParticipantStatus;
 	paletteIndex: number;
+	/** Elapsed time in ms since this mind entered the current active window.
+	 * Only meaningful when `status` is "thinking" or "speaking". */
+	elapsedMs?: number;
+	/** Most-recent tool name the child Pi started for this mind. Surfaced
+	 * to give the operator real-time visibility into what the mind is doing
+	 * during long sub-turn loops (e.g., bash, read, edit). */
+	currentTool?: string;
 };
 
 export type RoomStateView = {
@@ -64,6 +94,9 @@ export type RoomStateView = {
 	mode: string;
 	roomLabel?: string;
 	participants: ParticipantStateView[];
+	/** Animation frame index for the active-state spinner. The room ticker
+	 * increments this and re-renders while any participant is active. */
+	spinnerFrame?: number;
 };
 
 export type MindSpeechDetails = {
@@ -104,6 +137,19 @@ export type RoundMetricsDetails = {
 		cost?: number;
 	};
 };
+
+export type RoomNoticeLevel = "info" | "warning";
+
+export function renderRoomNoticeLine(
+	text: string,
+	level: RoomNoticeLevel = "info",
+): string {
+	const color =
+		level === "warning" ? ROOM_NOTICE_WARNING_RGB : ROOM_NOTICE_INFO_RGB;
+	const dot = ansiFg(color, "·");
+	const body = ansiFg(color, ansiItalic(text || ""));
+	return `${dot} ${body}`;
+}
 
 export function djb2(input: string): number {
 	let hash = 5381;
@@ -147,18 +193,14 @@ export function colorForMind(
 	return palette[index] ?? palette[0] ?? { name: "default", rgb: [200, 200, 200] };
 }
 
-const STATUS_GLYPH: Record<ParticipantStatus, string> = {
-	ready: "○", // ○
-	thinking: "◐", // ◐
-	speaking: "●", // ●
-	done: "✔", // ✔
-	aborted: "·", // ·
-	error: "×", // ×
-};
-
 /**
  * Build the participant bar for the editor widget.
- * The factory returns a fresh component each render via setWidget(...) calls.
+ *
+ * State encoding strategy: the GLYPH and COLOR together encode the participant's
+ * status, while the slug provides identity. Active states (thinking/speaking)
+ * use a rotating braille spinner in the participant's palette color and bold
+ * the name, plus suffix the elapsed time. Done/ready/error each get a
+ * distinct color so the eye reads state without parsing shape alone.
  */
 export function renderParticipantBarLines(state: RoomStateView): string[] {
 	if (!state.active || state.participants.length === 0) return [];
@@ -171,18 +213,59 @@ export function renderParticipantBarLines(state: RoomStateView): string[] {
 	if (state.roomLabel) labelParts.push(ansiDim(`· ${state.roomLabel}`));
 	segments.push(labelParts.join(" "));
 
+	const frameIndex =
+		((state.spinnerFrame ?? 0) % PARTICIPANT_SPINNER_FRAMES.length +
+			PARTICIPANT_SPINNER_FRAMES.length) %
+		PARTICIPANT_SPINNER_FRAMES.length;
+	const spinner = PARTICIPANT_SPINNER_FRAMES[frameIndex] ?? "·";
+
 	for (const p of state.participants) {
-		const color = palette[p.paletteIndex] ?? palette[0];
-		const glyph = STATUS_GLYPH[p.status] ?? STATUS_GLYPH.ready;
-		const colored = color ? ansiFg(color.rgb, glyph) : glyph;
-		const name =
-			p.role === "moderator"
-				? `${p.slug}${ansiDim(" (mod)")}`
-				: p.slug;
-		segments.push(`${colored} ${name}`);
+		segments.push(renderParticipantSegment(p, palette, spinner));
 	}
 
 	return [segments.join("  ")];
+}
+
+function renderParticipantSegment(
+	p: ParticipantStateView,
+	palette: typeof MIND_PALETTE,
+	spinner: string,
+): string {
+	const paletteEntry = palette[p.paletteIndex] ?? palette[0];
+	const paletteRgb = paletteEntry?.rgb ?? [200, 200, 200];
+	const modBadge = p.role === "moderator" ? ansiDim(" (mod)") : "";
+
+	let glyph: string;
+	let name: string;
+	let suffix = "";
+
+	if (p.status === "thinking" || p.status === "speaking") {
+		glyph = ansiFg(paletteRgb, spinner);
+		name = ansiFg(paletteRgb, ansiBold(p.slug));
+		const parts: string[] = [];
+		if (typeof p.elapsedMs === "number" && p.elapsedMs > 0) {
+			parts.push(formatDurationMs(p.elapsedMs));
+		}
+		if (p.currentTool && p.currentTool.length > 0) {
+			parts.push(p.currentTool);
+		}
+		if (parts.length > 0) suffix = ` ${ansiDim(parts.join(" · "))}`;
+	} else if (p.status === "done") {
+		glyph = ansiFg(PARTICIPANT_DONE_RGB, "✓");
+		name = ansiFg(PARTICIPANT_DONE_RGB, p.slug);
+	} else if (p.status === "error") {
+		glyph = ansiFg(PARTICIPANT_ERROR_RGB, "✕");
+		name = ansiFg(PARTICIPANT_ERROR_RGB, p.slug);
+	} else if (p.status === "aborted") {
+		glyph = ansiFg(PARTICIPANT_READY_RGB, "·");
+		name = ansiDim(p.slug);
+	} else {
+		// ready / fallback — outline glyph in palette color, default name color
+		glyph = ansiFg(paletteRgb, "◌");
+		name = p.slug;
+	}
+
+	return `${glyph} ${name}${modBadge}${suffix}`;
 }
 
 export function userRoomMessageRenderer(
@@ -248,7 +331,12 @@ export function mindSpeechRenderer(
 	container.addChild(new Text(header, 0, 0));
 
 	const body = (text ?? "").trim();
-	const showFullBody = options.expanded || isSynthesis || body.length <= 280;
+	// In-flight turns (no durationMs yet) auto-expand so the operator can read
+	// the mind's output as it streams. Once the turn completes, the existing
+	// 280-char threshold takes over for scrollback ergonomics.
+	const inFlight = typeof detailsRaw.durationMs !== "number";
+	const showFullBody =
+		options.expanded || isSynthesis || inFlight || body.length <= 280;
 	if (isSynthesis && body.length > 0) {
 		const rule = "─".repeat(24);
 		const ruled = color ? ansiFg(color.rgb, rule) : rule;

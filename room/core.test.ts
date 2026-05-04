@@ -15,7 +15,11 @@ import {
 	buildRoomHistoryFromEntries,
 	deleteSavedRoom,
 	describeRoomState,
+	detectUserAddressedSlug,
+	detectUserAddressMentions,
 	dropRoomSessions,
+	inheritedAddressMentions,
+	isExplicitBroadcast,
 	latestRoomState,
 	listRoomSessions,
 	listSavedRooms,
@@ -327,6 +331,383 @@ describe("buildRoomHistoryFromEntries", () => {
 		expect(history).toEqual([
 			{ user: "two", assistant: "answer two" },
 			{ user: "three", assistant: "answer three" },
+		]);
+	});
+});
+
+describe("detectUserAddressedSlug", () => {
+	const participants = [{ slug: "moneypenny" }, { slug: "jarvis" }];
+
+	test("matches slug followed by comma", () => {
+		expect(
+			detectUserAddressedSlug("moneypenny, please introduce yourself.", participants),
+		).toBe("moneypenny");
+	});
+
+	test("matches slug followed by colon", () => {
+		expect(
+			detectUserAddressedSlug("jarvis: run the test matrix", participants),
+		).toBe("jarvis");
+	});
+
+	test("matches slug after a greeting prefix", () => {
+		expect(
+			detectUserAddressedSlug("Hey moneypenny, give me an update", participants),
+		).toBe("moneypenny");
+		expect(
+			detectUserAddressedSlug("hi jarvis, status?", participants),
+		).toBe("jarvis");
+	});
+
+	test("matches @-prefixed addresses with whitespace or end-of-string", () => {
+		expect(
+			detectUserAddressedSlug("@jarvis run the matrix", participants),
+		).toBe("jarvis");
+		expect(detectUserAddressedSlug("@moneypenny", participants)).toBe(
+			"moneypenny",
+		);
+	});
+
+	test("is case-insensitive on slug and greeting", () => {
+		expect(
+			detectUserAddressedSlug("MoneyPenny, status?", participants),
+		).toBe("moneypenny");
+		expect(
+			detectUserAddressedSlug("HEY Jarvis, ready?", participants),
+		).toBe("jarvis");
+	});
+
+	test("returns undefined for incidental mentions", () => {
+		expect(
+			detectUserAddressedSlug("I think moneypenny is great", participants),
+		).toBeUndefined();
+		expect(
+			detectUserAddressedSlug("the room with jarvis and moneypenny is busy", participants),
+		).toBeUndefined();
+		// No address punctuation after the slug — refuses to match.
+		expect(
+			detectUserAddressedSlug("moneypenny is great", participants),
+		).toBeUndefined();
+	});
+
+	test("returns undefined for empty or unaddressed messages", () => {
+		expect(detectUserAddressedSlug("", participants)).toBeUndefined();
+		expect(
+			detectUserAddressedSlug("   what's the next step?", participants),
+		).toBeUndefined();
+	});
+
+	test("returns undefined when no participant matches", () => {
+		expect(
+			detectUserAddressedSlug("ariadne, are you there?", participants),
+		).toBeUndefined();
+	});
+});
+
+describe("detectUserAddressMentions", () => {
+	const participants = [
+		{ slug: "moneypenny" },
+		{ slug: "jarvis" },
+		{ slug: "ariadne" },
+	];
+
+	test("returns [] when no participant is addressed (broadcast intent)", () => {
+		expect(
+			detectUserAddressMentions("what's the next step?", participants),
+		).toEqual([]);
+		expect(detectUserAddressMentions("hey all, weigh in", participants)).toEqual(
+			[],
+		);
+		expect(detectUserAddressMentions("", participants)).toEqual([]);
+	});
+
+	test("returns single lead when only the lead is named (targeted-single)", () => {
+		expect(
+			detectUserAddressMentions(
+				"moneypenny, what's the weather?",
+				participants,
+			),
+		).toEqual(["moneypenny"]);
+		expect(
+			detectUserAddressMentions("@jarvis run the matrix", participants),
+		).toEqual(["jarvis"]);
+	});
+
+	test("returns chain when lead names a second participant (chain intent)", () => {
+		expect(
+			detectUserAddressMentions(
+				"moneypenny, update jarvis on the project",
+				participants,
+			),
+		).toEqual(["moneypenny", "jarvis"]);
+	});
+
+	test("preserves message order, not participant order", () => {
+		// participants are listed moneypenny, jarvis, ariadne — but the message
+		// names ariadne before jarvis, so the chain reflects message order.
+		expect(
+			detectUserAddressMentions(
+				"moneypenny, ask ariadne and jarvis to weigh in",
+				participants,
+			),
+		).toEqual(["moneypenny", "ariadne", "jarvis"]);
+	});
+
+	test("requires lead address punctuation — bare mentions don't open a chain", () => {
+		// No address punctuation after "moneypenny" → no lead → broadcast.
+		expect(
+			detectUserAddressMentions(
+				"moneypenny is great and jarvis agrees",
+				participants,
+			),
+		).toEqual([]);
+	});
+
+	test("uses word-boundary match for chain mentions", () => {
+		// "jarvisaur" should not register as jarvis.
+		expect(
+			detectUserAddressMentions(
+				"moneypenny, the jarvisaur dataset is wild",
+				participants,
+			),
+		).toEqual(["moneypenny"]);
+	});
+
+	test("is case-insensitive on lead and chain mentions", () => {
+		expect(
+			detectUserAddressMentions(
+				"Hey MoneyPenny, brief Jarvis on the QA work",
+				participants,
+			),
+		).toEqual(["moneypenny", "jarvis"]);
+	});
+
+	test("dedupes the lead from the chain when re-mentioned", () => {
+		// "moneypenny" appears in the lead and again in the body — the second
+		// occurrence is skipped (lead is excluded from the secondary scan).
+		expect(
+			detectUserAddressMentions(
+				"moneypenny, ask jarvis and then loop moneypenny back in",
+				participants,
+			),
+		).toEqual(["moneypenny", "jarvis"]);
+	});
+});
+
+describe("isExplicitBroadcast", () => {
+	test("matches opening broadcast tokens with address punctuation", () => {
+		expect(isExplicitBroadcast("all, what's next?")).toBe(true);
+		expect(isExplicitBroadcast("everyone, weigh in")).toBe(true);
+		expect(isExplicitBroadcast("everybody: thoughts?")).toBe(true);
+		expect(isExplicitBroadcast("team, status update")).toBe(true);
+		expect(isExplicitBroadcast("folks, what do you think")).toBe(true);
+		expect(isExplicitBroadcast("guys, weigh in")).toBe(true);
+		expect(isExplicitBroadcast("y'all, ready?")).toBe(true);
+	});
+
+	test("matches even after a greeting prefix", () => {
+		expect(isExplicitBroadcast("Hey all, ready?")).toBe(true);
+		expect(isExplicitBroadcast("hi everyone")).toBe(true);
+		expect(isExplicitBroadcast("Hello team")).toBe(true);
+	});
+
+	test("is case-insensitive", () => {
+		expect(isExplicitBroadcast("ALL, status?")).toBe(true);
+		expect(isExplicitBroadcast("Everyone, weigh in")).toBe(true);
+	});
+
+	test("does not match incidental mid-sentence mentions", () => {
+		// The token must open the message, not appear later. "what does the
+		// team think" should NOT trigger broadcast — that's exactly the kind
+		// of accidental match that would frustrate operators.
+		expect(isExplicitBroadcast("what does the team think")).toBe(false);
+		expect(
+			isExplicitBroadcast("any chance everyone could weigh in"),
+		).toBe(false);
+		expect(isExplicitBroadcast("we should ask all of them")).toBe(false);
+	});
+
+	test("does not match unrelated openers", () => {
+		expect(isExplicitBroadcast("moneypenny, status?")).toBe(false);
+		expect(isExplicitBroadcast("what's next")).toBe(false);
+		expect(isExplicitBroadcast("")).toBe(false);
+		expect(isExplicitBroadcast("   ")).toBe(false);
+	});
+
+	test("requires word-boundary so 'teammate' / 'allotted' don't trip it", () => {
+		expect(isExplicitBroadcast("teammates can wait")).toBe(false);
+		expect(isExplicitBroadcast("allotted resources are tight")).toBe(false);
+	});
+
+	test("matches plural-address phrases anywhere in the message", () => {
+		// The motivating real-world case: operator pivots to broadcast
+		// mid-sentence after a prior targeted round.
+		expect(
+			isExplicitBroadcast(
+				"okay I'd like for you all to discuss our project",
+			),
+		).toBe(true);
+		expect(isExplicitBroadcast("what do all of you think")).toBe(true);
+		expect(isExplicitBroadcast("can you both weigh in on this")).toBe(true);
+		expect(isExplicitBroadcast("what would you guys recommend")).toBe(true);
+		expect(isExplicitBroadcast("you folks know the area")).toBe(true);
+		expect(isExplicitBroadcast("hey, y'all good?")).toBe(true);
+	});
+
+	test("phrase matching is case-insensitive", () => {
+		expect(isExplicitBroadcast("I want You All to chime in")).toBe(true);
+		expect(isExplicitBroadcast("ALL OF YOU should respond")).toBe(true);
+	});
+
+	test("phrase matching does not over-match solo tokens mid-sentence", () => {
+		// The fence the start-anchored token check defends. Adding mid-sentence
+		// phrase matching must not accidentally loosen this.
+		expect(isExplicitBroadcast("what does the team think")).toBe(false);
+		expect(isExplicitBroadcast("I asked everyone yesterday")).toBe(false);
+		expect(isExplicitBroadcast("we should ask all of them")).toBe(false);
+		expect(isExplicitBroadcast("the folks upstairs are busy")).toBe(false);
+	});
+
+	test("phrase matching respects word boundaries", () => {
+		// "youallsCorner" or "youguys-something" should not register.
+		expect(isExplicitBroadcast("the youallsCorner project")).toBe(false);
+		expect(isExplicitBroadcast("youguys-feature is rolling out")).toBe(false);
+	});
+
+	test("leading token without address punctuation does not trip (regression)", () => {
+		// Codex review caught this: "all" / "everyone" / "team" at the start
+		// of an ordinary sentence used to fire broadcast and break stickiness.
+		// Now they require address punctuation or end-of-string to count as
+		// a vocative gesture.
+		expect(isExplicitBroadcast("all tests are passing now")).toBe(false);
+		expect(isExplicitBroadcast("all I need is the latest log")).toBe(false);
+		expect(isExplicitBroadcast("everyone here is busy")).toBe(false);
+		expect(isExplicitBroadcast("team is shipping fast")).toBe(false);
+		expect(isExplicitBroadcast("folks downstairs are waiting")).toBe(false);
+	});
+
+	test("token alone or with address punctuation still fires", () => {
+		// Vocative form must continue working — the operator typing just
+		// "everyone" or "team!" is a clear room-wide gesture.
+		expect(isExplicitBroadcast("all")).toBe(true);
+		expect(isExplicitBroadcast("everyone")).toBe(true);
+		expect(isExplicitBroadcast("team!")).toBe(true);
+		expect(isExplicitBroadcast("all?")).toBe(true);
+		expect(isExplicitBroadcast("folks.")).toBe(true);
+	});
+});
+
+describe("inheritedAddressMentions", () => {
+	const participants = [
+		{ slug: "moneypenny" },
+		{ slug: "jarvis" },
+		{ slug: "ariadne" },
+	];
+
+	test("returns [] for empty history", () => {
+		expect(inheritedAddressMentions([], participants)).toEqual([]);
+	});
+
+	test("inherits the most recent targeted intent (single)", () => {
+		const history = [
+			{ speaker: "user", content: "moneypenny, can you introduce yourself?" },
+			{ speaker: "moneypenny", content: "Miss Moneypenny, at your service." },
+		];
+		expect(inheritedAddressMentions(history, participants)).toEqual([
+			"moneypenny",
+		]);
+	});
+
+	test("inherits a chain", () => {
+		const history = [
+			{
+				speaker: "user",
+				content: "moneypenny, brief jarvis on the QA work",
+			},
+			{ speaker: "moneypenny", content: "..." },
+			{ speaker: "jarvis", content: "..." },
+		];
+		expect(inheritedAddressMentions(history, participants)).toEqual([
+			"moneypenny",
+			"jarvis",
+		]);
+	});
+
+	test("walks back through blank user messages to find the source intent", () => {
+		// Round 1 targeted moneypenny; round 2 was blank (would have inherited
+		// in the open-floor wiring). The current call's history shows both —
+		// walk back through round 2's blank user message to reach round 1.
+		const history = [
+			{ speaker: "user", content: "moneypenny, introduce yourself" },
+			{ speaker: "moneypenny", content: "..." },
+			{ speaker: "user", content: "what are your responsibilities?" },
+			{ speaker: "moneypenny", content: "..." },
+		];
+		expect(inheritedAddressMentions(history, participants)).toEqual([
+			"moneypenny",
+		]);
+	});
+
+	test("stops at an explicit broadcast — topic shift resets stickiness", () => {
+		// Operator targeted moneypenny, then explicitly broadcast. A blank
+		// follow-up after the broadcast must NOT resurrect moneypenny.
+		const history = [
+			{ speaker: "user", content: "moneypenny, introduce yourself" },
+			{ speaker: "moneypenny", content: "..." },
+			{ speaker: "user", content: "team, what's the status?" },
+			{ speaker: "moneypenny", content: "..." },
+			{ speaker: "jarvis", content: "..." },
+		];
+		expect(inheritedAddressMentions(history, participants)).toEqual([]);
+	});
+
+	test("returns [] when no prior user message has mentions", () => {
+		const history = [
+			{ speaker: "user", content: "should we ship?" },
+			{ speaker: "moneypenny", content: "..." },
+			{ speaker: "user", content: "and after that?" },
+			{ speaker: "moneypenny", content: "..." },
+		];
+		expect(inheritedAddressMentions(history, participants)).toEqual([]);
+	});
+
+	test("ignores non-user turns when walking back", () => {
+		// A speaker-emitted turn that happens to mention a slug must not be
+		// confused for an operator address. Only user turns count.
+		const history = [
+			{ speaker: "moneypenny", content: "I think jarvis, ariadne, and I…" },
+			{ speaker: "user", content: "moneypenny, status?" },
+			{ speaker: "moneypenny", content: "..." },
+			{ speaker: "user", content: "follow up" },
+			{ speaker: "moneypenny", content: "..." },
+		];
+		expect(inheritedAddressMentions(history, participants)).toEqual([
+			"moneypenny",
+		]);
+	});
+
+	test("skips one-shot @<slug> entries — the bypass must not establish stickiness", () => {
+		// `persistRoundToDisk` stores @-direct-address rounds with a leading
+		// "@slug " prefix. Inheriting from those would turn the documented
+		// one-shot bypass into multi-turn routing.
+		const history = [
+			{ speaker: "user", content: "@jarvis what's up?" },
+			{ speaker: "jarvis", content: "..." },
+		];
+		expect(inheritedAddressMentions(history, participants)).toEqual([]);
+	});
+
+	test("walks past an @<slug> entry to find an earlier targeted intent", () => {
+		// The @-bypass round is skipped, but a real targeted round before
+		// it should still be inheritable.
+		const history = [
+			{ speaker: "user", content: "moneypenny, brief me" },
+			{ speaker: "moneypenny", content: "..." },
+			{ speaker: "user", content: "@jarvis quick aside" },
+			{ speaker: "jarvis", content: "..." },
+		];
+		expect(inheritedAddressMentions(history, participants)).toEqual([
+			"moneypenny",
 		]);
 	});
 });

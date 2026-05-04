@@ -140,6 +140,8 @@ export function buildSpeakerPrompt(input: BuildSpeakerPromptInput): string {
 		? renderAddressedToYou(input.addressedFrom)
 		: "";
 
+	const operatorContext = renderOperatorContext();
+
 	const message = `<message sender="You">${xmlEscape(input.userMessage)}</message>`;
 
 	const addressingTrailer = input.addressingEnabled
@@ -153,12 +155,25 @@ export function buildSpeakerPrompt(input: BuildSpeakerPromptInput): string {
 		identity,
 		room,
 		historyXml,
+		operatorContext,
 		directionXml,
 		addressedXml,
 		message,
 		addressingTrailer,
 	].filter((b) => b && b.trim().length > 0);
 	return blocks.join("\n\n");
+}
+
+function renderOperatorContext(): string {
+	return [
+		`<operator-context>`,
+		`A human operator is observing this room in real time and reads every turn.`,
+		`- Be concise. Do not restate the plan, recap the previous turn, or paraphrase another mind for confirmation — the operator has already read it.`,
+		`- If you and another mind have already agreed on the next action, do not re-affirm. Close with { "action": "end", "reason": "..." }.`,
+		`- If the next step belongs to the operator (run a command, choose, approve, supply context), name it briefly and end the discussion.`,
+		`- Address another mind only when you genuinely need their judgment to advance — not as a courtesy handoff.`,
+		`</operator-context>`,
+	].join("\n");
 }
 
 function renderAddressedToYou(addressedFrom: {

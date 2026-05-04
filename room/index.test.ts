@@ -284,6 +284,18 @@ function roomStateEntry(
 	};
 }
 
+function lastRoomNotice(
+	_harness: ReturnType<typeof createHarness>,
+	ctx: { widgets: WidgetCall[] },
+): string | undefined {
+	const notices = ctx.widgets.filter(
+		(w) => w.key === "room-notice" && Array.isArray(w.content),
+	);
+	const last = notices[notices.length - 1];
+	const content = last?.content;
+	return Array.isArray(content) ? content.join("\n") : undefined;
+}
+
 describe("room extension", () => {
 	beforeEach(() => {
 		resetSessionExit();
@@ -301,7 +313,7 @@ describe("room extension", () => {
 		]);
 	});
 
-	test("registers all four chamber message renderers", () => {
+	test("registers all chamber message renderers", () => {
 		const harness = createHarness();
 		expect([...harness.messageRenderers.keys()].sort()).toEqual(
 			[
@@ -407,7 +419,7 @@ describe("room extension", () => {
 				key: "room",
 				value: " room concurrent:2",
 			});
-			expect(ctx.notifications[0].message).toContain("Unsaved one-off room");
+			expect(lastRoomNotice(harness, ctx)).toContain("Unsaved one-off room");
 		});
 	});
 
@@ -420,11 +432,11 @@ describe("room extension", () => {
 
 			await harness.commands.get("room")?.handler("on concurrent all", ctx);
 
-			const lastWidget = ctx.widgets[ctx.widgets.length - 1];
-			expect(lastWidget?.key).toBe("room-stage");
-			expect(Array.isArray(lastWidget?.content)).toBe(true);
-			expect((lastWidget?.content as string[]).join(" ")).toContain("ariadne");
-			expect((lastWidget?.content as string[]).join(" ")).toContain("mycroft");
+			const stageCalls = ctx.widgets.filter((w) => w.key === "room-stage");
+			const lastStage = stageCalls[stageCalls.length - 1];
+			expect(Array.isArray(lastStage?.content)).toBe(true);
+			expect((lastStage?.content as string[]).join(" ")).toContain("ariadne");
+			expect((lastStage?.content as string[]).join(" ")).toContain("mycroft");
 		});
 	});
 
@@ -575,10 +587,7 @@ describe("room extension", () => {
 				harness.appendEntries[harness.appendEntries.length - 1].entry
 					.moderator,
 			).toBeUndefined();
-			const activationNote = ctx.notifications.find((n) =>
-				n.message.includes("Room active"),
-			);
-			expect(activationNote?.message).toContain("chairman");
+			expect(lastRoomNotice(harness, ctx)).toContain("chairman");
 		});
 	});
 
@@ -628,15 +637,11 @@ describe("room extension", () => {
 				key: "room",
 				value: undefined,
 			});
-			const lastWidget = ctx.widgets[ctx.widgets.length - 1];
-			expect(lastWidget?.key).toBe("room-stage");
-			expect(lastWidget?.content).toBeUndefined();
-			expect(ctx.notifications[ctx.notifications.length - 1].message).toContain(
-				"Room off",
-			);
-			expect(
-				ctx.notifications[ctx.notifications.length - 1].message,
-			).toContain("Conversation continues in this session");
+			const stageCalls = ctx.widgets.filter((w) => w.key === "room-stage");
+			expect(stageCalls[stageCalls.length - 1]?.content).toBeUndefined();
+			const leaveNotice = lastRoomNotice(harness, ctx);
+			expect(leaveNotice).toContain("Room off");
+			expect(leaveNotice).toContain("Conversation continues in this session");
 		});
 	});
 
@@ -706,9 +711,7 @@ describe("room extension", () => {
 				key: "room",
 				value: undefined,
 			});
-			expect(
-				ctx.notifications[ctx.notifications.length - 1].message,
-			).toContain("Detached from room");
+			expect(lastRoomNotice(harness, ctx)).toContain("Detached from room");
 		});
 	});
 
@@ -926,9 +929,7 @@ describe("room extension", () => {
 					slug: "design-review",
 				}),
 			});
-			expect(ctx.notifications[0].message).toContain(
-				`Saved as "design-review"`,
-			);
+			expect(lastRoomNotice(harness, ctx)).toContain('Saved as "design-review"');
 		});
 	});
 
@@ -951,7 +952,7 @@ describe("room extension", () => {
 			expect(
 				harness.appendEntries[harness.appendEntries.length - 1].entry.slug,
 			).toBeUndefined();
-			expect(ctx.notifications[0].message).toContain("Unsaved one-off room");
+			expect(lastRoomNotice(harness, ctx)).toContain("Unsaved one-off room");
 		});
 	});
 
@@ -1037,12 +1038,7 @@ describe("room extension", () => {
 
 			await harness.commands.get("next")?.handler("mycroft", ctx);
 
-			expect(ctx.notifications[ctx.notifications.length - 1]).toEqual(
-				expect.objectContaining({
-					type: "info",
-					message: expect.stringContaining("next speaker = mycroft"),
-				}),
-			);
+			expect(lastRoomNotice(harness, ctx)).toContain("next speaker = mycroft");
 		});
 	});
 
@@ -1127,15 +1123,11 @@ describe("room extension", () => {
 			const ctx = createContext(cwd, entries);
 			await runHandler(harness, "session_start", { reason: "startup" }, ctx);
 			ctx.notifications.length = 0;
+			harness.sentMessages.length = 0;
 
 			await harness.commands.get("next")?.handler("mycroft", ctx);
 
-			expect(ctx.notifications[ctx.notifications.length - 1]).toEqual(
-				expect.objectContaining({
-					type: "info",
-					message: expect.stringContaining("next speaker = mycroft"),
-				}),
-			);
+			expect(lastRoomNotice(harness, ctx)).toContain("next speaker = mycroft");
 		});
 	});
 
@@ -1171,15 +1163,11 @@ describe("room extension", () => {
 			const ctx = createContext(cwd, entries);
 			await runHandler(harness, "session_start", { reason: "startup" }, ctx);
 			ctx.notifications.length = 0;
+			harness.sentMessages.length = 0;
 
 			await harness.commands.get("next")?.handler("mycroft", ctx);
 
-			expect(ctx.notifications[ctx.notifications.length - 1]).toEqual(
-				expect.objectContaining({
-					type: "info",
-					message: expect.stringContaining("next speaker = mycroft"),
-				}),
-			);
+			expect(lastRoomNotice(harness, ctx)).toContain("next speaker = mycroft");
 		});
 	});
 
@@ -1215,15 +1203,11 @@ describe("room extension", () => {
 			const ctx = createContext(cwd, entries);
 			await runHandler(harness, "session_start", { reason: "startup" }, ctx);
 			ctx.notifications.length = 0;
+			harness.sentMessages.length = 0;
 
 			await harness.commands.get("inject")?.handler("focus on cost", ctx);
 
-			expect(ctx.notifications[ctx.notifications.length - 1]).toEqual(
-				expect.objectContaining({
-					type: "info",
-					message: expect.stringContaining("focus on cost"),
-				}),
-			);
+			expect(lastRoomNotice(harness, ctx)).toContain("focus on cost");
 		});
 	});
 
@@ -1379,12 +1363,7 @@ describe("room extension", () => {
 				.get("inject")
 				?.handler("focus on cost", ctx);
 
-			expect(ctx.notifications[ctx.notifications.length - 1]).toEqual(
-				expect.objectContaining({
-					type: "info",
-					message: expect.stringContaining("focus on cost"),
-				}),
-			);
+			expect(lastRoomNotice(harness, ctx)).toContain("focus on cost");
 		});
 	});
 
@@ -1543,8 +1522,9 @@ describe("room extension", () => {
 					preRoomLeafId: "entry-pre-picker",
 				}),
 			});
-			expect(ctx.notifications[0].message).toContain("Loaded 1 prior turn");
-			expect(ctx.notifications[0].message).toContain("/detach");
+			const activationNotice = lastRoomNotice(harness, ctx);
+			expect(activationNotice).toContain("Loaded 1 prior turn");
+			expect(activationNotice).toContain("/detach");
 		});
 	});
 
@@ -1568,13 +1548,7 @@ describe("room extension", () => {
 			expect(fs.existsSync(path.join(cwd, ".pi", "rooms", "review"))).toBe(
 				false,
 			);
-			const last = ctx.notifications[ctx.notifications.length - 1];
-			expect(last).toEqual(
-				expect.objectContaining({
-					type: "info",
-					message: expect.stringContaining('Closed saved room "review"'),
-				}),
-			);
+			expect(lastRoomNotice(harness, ctx)).toContain('Closed saved room "review"');
 		});
 	});
 
@@ -1688,9 +1662,12 @@ describe("room extension", () => {
 			expect(
 				fs.existsSync(path.join(cwd, ".pi", "rooms", "elsewhere")),
 			).toBe(false);
-			const closed = ctx.notifications.find((n) =>
-				n.message.includes('Closed saved room "elsewhere"'),
-			);
+			const closed = ctx.widgets.find((w) => {
+				if (w.key !== "room-notice" || !Array.isArray(w.content)) return false;
+				return (w.content as string[]).some((line) =>
+					line.includes('Closed saved room "elsewhere"'),
+				);
+			});
 			expect(closed).toBeDefined();
 		});
 	});

@@ -31,12 +31,12 @@ export const DEFAULT_OPEN_FLOOR_REPEAT_CAP = 2;
 /**
  * Fraction of speakers whose `{action:"end"}` votes the round must EXCEED
  * (after `minRounds` is met) before open-floor closes early. Strict-`>`
- * comparison: with the default 0.5, a tie (e.g. 1/2 or 2/4) does NOT close —
- * "simple majority" means more than half. Set higher to require near-consensus,
- * or lower (down to a value just under the smallest representable ratio) to
- * let any single end vote close the room.
+ * comparison: at 0.49 a single end vote in a 2-mind room (1/2 = 0.5 > 0.49)
+ * closes; in a 4-mind room two votes are still required (2/4 = 0.5 > 0.49,
+ * but 1/4 = 0.25 is not). Raise toward 0.66 for near-consensus on larger
+ * rooms; lower toward 0 to let any single end vote close.
  */
-export const DEFAULT_OPEN_FLOOR_END_VOTE_THRESHOLD = 0.5;
+export const DEFAULT_OPEN_FLOOR_END_VOTE_THRESHOLD = 0.49;
 export const ROOM_STATE_CUSTOM_TYPE = "room-state";
 export const ROOMS_BASE_DIR = ".pi/rooms";
 export const SAVED_ROOM_CONFIG_FILE = "room.json";
@@ -442,6 +442,179 @@ export function xmlEscape(value: string): string {
 		.replace(/>/g, "&gt;")
 		.replace(/'/g, "&apos;")
 		.replace(/"/g, "&quot;");
+}
+
+/**
+ * Detect whether the user's message opens with a direct address to one of
+ * the room participants (e.g., "moneypenny, please ..." or "@jarvis run ...").
+ * Returns the matched participant slug, or undefined if no clear address.
+ *
+ * Match rules:
+ * - An optional `@` or greeting word ("hey", "hi", "hello") may precede the slug.
+ * - The slug must be followed by clear address punctuation (`,` `:` `.` `?` `!`)
+ *   to avoid false positives on incidental mentions ("moneypenny is great").
+ * - When the message starts with `@`, trailing whitespace or end-of-string
+ *   also count as address terminators.
+ *
+ * Used by open-floor (and potentially other strategies) to override the
+ * default first-speaker selection so an explicitly addressed mind doesn't
+ * have to wait for another mind to "hand off the floor."
+ */
+export function detectUserAddressedSlug(
+	userMessage: string,
+	participants: ReadonlyArray<{ slug: string }>,
+): string | undefined {
+	if (!userMessage) return undefined;
+	const trimmed = userMessage.replace(/^\s+/, "");
+	if (!trimmed) return undefined;
+	const startedWithAt = trimmed.startsWith("@");
+	const greetingStripped = trimmed.replace(/^(?:@|hey|hi|hello)\s*/i, "");
+	const lower = greetingStripped.toLowerCase();
+	for (const p of participants) {
+		const slugLower = p.slug.toLowerCase();
+		if (!lower.startsWith(slugLower)) continue;
+		const next = greetingStripped.charAt(slugLower.length);
+		if (/[,:.?!]/.test(next)) return p.slug;
+		if (startedWithAt && (!next || /\s/.test(next))) return p.slug;
+	}
+	return undefined;
+}
+
+/**
+ * Extract every participant slug the operator named in the message, in the
+ * order they appear. The lead must satisfy `detectUserAddressedSlug` (i.e.
+ * open the message with an address pattern); otherwise the message is
+ * treated as a broadcast and `[]` is returned. After the lead, additional
+ * participants are picked up via word-boundary matches anywhere in the rest
+ * of the message body.
+ *
+ * Used by open-floor to pick a routing intent:
+ * - `[]`        → broadcast (full discussion loop, current behavior)
+ * - `[lead]`    → targeted-single (close after lead unless they address a peer)
+ * - `[lead, …]` → chain (queue the named minds after the lead, drain in order)
+ *
+ * Heuristic, not a parser. Incidental mentions like "moneypenny, jarvis loves
+ * pizza" will over-include jarvis. The routing-intent audit line emitted at
+ * round start lets the operator catch and override misreads before more
+ * minds are pulled in.
+ */
+export function detectUserAddressMentions(
+	userMessage: string,
+	participants: ReadonlyArray<{ slug: string }>,
+): string[] {
+	const lead = detectUserAddressedSlug(userMessage, participants);
+	if (!lead) return [];
+	const lower = userMessage.toLowerCase();
+	const leadIdx = findSlugWordIndex(lower, lead.toLowerCase(), 0);
+	const cursor = leadIdx >= 0 ? leadIdx + lead.length : 0;
+	const rest: Array<{ slug: string; pos: number }> = [];
+	for (const p of participants) {
+		if (p.slug === lead) continue;
+		const pos = findSlugWordIndex(lower, p.slug.toLowerCase(), cursor);
+		if (pos >= 0) rest.push({ slug: p.slug, pos });
+	}
+	rest.sort((a, b) => a.pos - b.pos);
+	return [lead, ...rest.map((r) => r.slug)];
+}
+
+function findSlugWordIndex(
+	text: string,
+	slug: string,
+	fromIndex: number,
+): number {
+	let i = fromIndex;
+	while (i <= text.length) {
+		const idx = text.indexOf(slug, i);
+		if (idx < 0) return -1;
+		const before = idx === 0 ? "" : text[idx - 1];
+		const after =
+			idx + slug.length >= text.length ? "" : text[idx + slug.length];
+		const wordCharBefore = before !== "" && /[a-z0-9]/.test(before);
+		const wordCharAfter = after !== "" && /[a-z0-9]/.test(after);
+		if (!wordCharBefore && !wordCharAfter) return idx;
+		i = idx + 1;
+	}
+	return -1;
+}
+
+// Vocative form: token at start, followed by address punctuation or
+// end-of-string (with optional whitespace either side). The `\b`-only form
+// over-matched ordinary openers like "all tests are passing" / "all I need
+// is …" / "team is shipping fast" — those are descriptive, not addressing
+// the room. Requiring punctuation/end keeps the operator's "I'm talking to
+// the group" gesture distinguishable from quantifier or subject usage.
+const BROADCAST_TOKEN_PATTERN =
+	/^(?:all|everyone|everybody|team|folks|guys|y'all)(?:\s*[,:.?!]|\s*$)/i;
+
+/**
+ * Mid-sentence plural-address phrases. Matched anywhere in the message, not
+ * just at the start. Each phrase pairs "you" (second person) with a plural
+ * marker, which is a stronger broadcast signal than solo tokens like "team"
+ * or "everyone" mid-sentence (those would over-match — "what does the team
+ * think" / "I asked everyone yesterday" are clearly not broadcasts).
+ */
+const BROADCAST_PHRASE_PATTERN =
+	/\b(?:you all|all of you|you both|you guys|you folks|y'all)\b/i;
+
+/**
+ * Detect an explicit "talk to everyone" gesture. Two paths:
+ *
+ * - Opener tokens at the start (after greeting strip): "team, …",
+ *   "everyone: …", "Hey all". Conservative on purpose — only matched at the
+ *   start, so "what does the team think" doesn't accidentally trip.
+ * - Plural-address phrases anywhere: "for you all to discuss …", "what do
+ *   you both think". Operators rarely use these phrasings without meaning
+ *   the room.
+ *
+ * Either path forces broadcast intent regardless of stickiness — the
+ * operator is signalling a topic shift, so we shouldn't carry forward a
+ * prior single or chain target.
+ */
+export function isExplicitBroadcast(userMessage: string): boolean {
+	if (!userMessage) return false;
+	const trimmed = userMessage.replace(/^\s+/, "");
+	if (!trimmed) return false;
+	const greetingStripped = trimmed.replace(/^(?:@|hey|hi|hello)\s*/i, "");
+	if (BROADCAST_TOKEN_PATTERN.test(greetingStripped)) return true;
+	return BROADCAST_PHRASE_PATTERN.test(trimmed);
+}
+
+/**
+ * Walk back through prior user messages in `history` to find the most recent
+ * targeted intent. Used by open-floor to give blank follow-ups stickiness
+ * — "what about Y?" after "moneypenny, X" stays with moneypenny instead of
+ * pulling other minds in via the leastSpoken fallback.
+ *
+ * Stops the walk on any explicit broadcast in history: that operator
+ * gesture was a deliberate topic shift, and inheriting a stale targeted
+ * round through it would be more wrong than helpful. Returns [] when
+ * nothing inheritable is found, which the caller treats as broadcast.
+ *
+ * Bounded by whatever round-history cap the caller passed in (typically 2),
+ * so very long blank chains will eventually fall back to broadcast as the
+ * original targeted message ages out.
+ */
+export function inheritedAddressMentions(
+	history: ReadonlyArray<{ speaker: string; content: string }>,
+	participants: ReadonlyArray<{ slug: string }>,
+): string[] {
+	for (let i = history.length - 1; i >= 0; i--) {
+		const turn = history[i];
+		if (turn.speaker !== "user") continue;
+		// Skip the documented one-shot `@<slug>` bypass. Those rounds run as
+		// concurrent single-recipient turns and aren't meant to influence
+		// future routing. `persistRoundToDisk` stores the user text with a
+		// leading "@slug " prefix (and `parseDirectAddress` only matches
+		// strict `^@`), so a leading "@" reliably identifies them. Without
+		// this skip, a later blank follow-up would inherit the @-target as
+		// a sticky single intent — turning the bypass into a multi-turn
+		// route, which the operator never asked for.
+		if (turn.content.replace(/^\s+/, "").startsWith("@")) continue;
+		if (isExplicitBroadcast(turn.content)) return [];
+		const mentions = detectUserAddressMentions(turn.content, participants);
+		if (mentions.length > 0) return mentions;
+	}
+	return [];
 }
 
 export function buildRoomHistoryFromEntries(

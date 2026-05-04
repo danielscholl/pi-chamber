@@ -505,6 +505,570 @@ describe("OpenFloorStrategy", () => {
 		expect(consumed).toBe(true);
 	});
 
+	test("single intent: closes after the lead's turn when they don't hand off", async () => {
+		const captured: CapturedSpawn[] = [];
+		// Operator addresses ariadne; her reply has no JSON tail. Without the
+		// single-intent close, the leastSpoken fallback would force mycroft to
+		// take a turn — exactly the unwanted "Jarvis chimed in" behavior.
+		const spawn = fakeSpawn(captured, {
+			ariadne: "the weather is fine.",
+			mycroft: "should not run",
+		});
+		const { ctx, events } = makeContext("/tmp/test", spawn);
+		const minds = new Map<string, MindSpec>([
+			["ariadne", makeMindSpec("ariadne")],
+			["mycroft", makeMindSpec("mycroft", 1)],
+		]);
+
+		const result = await executeStrategy({
+			mode: "open-floor",
+			userMessage: "ariadne, what's the weather?",
+			mindsBySlug: minds,
+			participantOrder: ["ariadne", "mycroft"],
+			roundHistory: [],
+			context: ctx,
+			openFloorConfig: {
+				maxTurns: 6,
+				minRounds: 1,
+				maxSpeakerRepeats: 2,
+				endVoteThreshold: 0.5,
+			},
+		});
+
+		expect(captured.map((c) => c.slug)).toEqual(["ariadne"]);
+		expect(result.turns).toBe(1);
+		// The routed-audit line surfaces the single intent at round start.
+		const openDecision = events.find(
+			(e) => e.type === "moderator-decision" && (e as { action: string }).action === "open",
+		) as { direction?: string } | undefined;
+		expect(openDecision?.direction).toBe("Routed: single → ariadne.");
+	});
+
+	test("single intent: lead's explicit address continues into a normal handoff", async () => {
+		const captured: CapturedSpawn[] = [];
+		const spawn = fakeSpawn(captured, {
+			ariadne:
+				'A. {"action":"address","slug":"mycroft","reason":"his domain"}',
+			mycroft: 'M. {"action":"end","reason":"done"}',
+		});
+		const { ctx } = makeContext("/tmp/test", spawn);
+		const minds = new Map<string, MindSpec>([
+			["ariadne", makeMindSpec("ariadne")],
+			["mycroft", makeMindSpec("mycroft", 1)],
+		]);
+
+		await executeStrategy({
+			mode: "open-floor",
+			userMessage: "ariadne, what should we do?",
+			mindsBySlug: minds,
+			participantOrder: ["ariadne", "mycroft"],
+			roundHistory: [],
+			context: ctx,
+			openFloorConfig: {
+				maxTurns: 6,
+				minRounds: 1,
+				maxSpeakerRepeats: 2,
+				endVoteThreshold: 0.5,
+			},
+		});
+
+		// Lead handed off explicitly → mycroft sees the addressed-to-you block
+		// with the lead's reason, then closes via end vote.
+		expect(captured.map((c) => c.slug)).toEqual(["ariadne", "mycroft"]);
+		expect(captured[1].prompt).toContain('<addressed-to-you sender="ariadne"');
+		expect(captured[1].prompt).toContain("his domain");
+	});
+
+	test("chain intent: drains the operator-named queue with addressed-to-you framing", async () => {
+		const captured: CapturedSpawn[] = [];
+		// "ariadne, update mycroft" — ariadne is the lead, mycroft is queued.
+		// Neither emits a JSON tail; without chain-drain, scout (least-spoken)
+		// would be pulled in instead of mycroft.
+		const spawn = fakeSpawn(captured, {
+			ariadne: "here's the update on the QA project.",
+			mycroft: "got it, will follow up.",
+			scout: "should not run",
+		});
+		const { ctx, events } = makeContext("/tmp/test", spawn);
+		const minds = new Map<string, MindSpec>([
+			["ariadne", makeMindSpec("ariadne")],
+			["mycroft", makeMindSpec("mycroft", 1)],
+			["scout", makeMindSpec("scout", 2)],
+		]);
+
+		const result = await executeStrategy({
+			mode: "open-floor",
+			userMessage: "ariadne, update mycroft on the project",
+			mindsBySlug: minds,
+			participantOrder: ["ariadne", "mycroft", "scout"],
+			roundHistory: [],
+			context: ctx,
+			openFloorConfig: {
+				maxTurns: 6,
+				minRounds: 1,
+				maxSpeakerRepeats: 2,
+				endVoteThreshold: 0.5,
+			},
+		});
+
+		expect(captured.map((c) => c.slug)).toEqual(["ariadne", "mycroft"]);
+		expect(result.turns).toBe(2);
+		// mycroft's prompt frames the handoff via the just-finished speaker
+		// (ariadne) but without a peer-supplied reason — the operator's intent
+		// is already in the user-message block.
+		expect(captured[1].prompt).toContain('<addressed-to-you sender="ariadne"/>');
+		// The opener-decision audit reports the full chain.
+		const openDecision = events.find(
+			(e) => e.type === "moderator-decision" && (e as { action: string }).action === "open",
+		) as { direction?: string } | undefined;
+		expect(openDecision?.direction).toBe(
+			"Routed: chain → ariadne → mycroft.",
+		);
+		// And the chain-drain handoff is itself audited.
+		const chainHandoff = events.find(
+			(e) =>
+				e.type === "moderator-decision" &&
+				(e as { direction?: string }).direction === "operator-named chain",
+		) as { nextSpeaker?: string } | undefined;
+		expect(chainHandoff?.nextSpeaker).toBe("mycroft");
+	});
+
+	test("chain intent: an end vote on any turn closes the round immediately", async () => {
+		const captured: CapturedSpawn[] = [];
+		const spawn = fakeSpawn(captured, {
+			ariadne: 'A. {"action":"end","reason":"resolved before brief"}',
+			mycroft: "should not run",
+		});
+		const { ctx } = makeContext("/tmp/test", spawn);
+		const minds = new Map<string, MindSpec>([
+			["ariadne", makeMindSpec("ariadne")],
+			["mycroft", makeMindSpec("mycroft", 1)],
+		]);
+
+		const result = await executeStrategy({
+			mode: "open-floor",
+			userMessage: "ariadne, brief mycroft",
+			mindsBySlug: minds,
+			participantOrder: ["ariadne", "mycroft"],
+			roundHistory: [],
+			context: ctx,
+			// minRounds=2 would normally require both speakers to be heard
+			// before any end vote could close. Chain intent bypasses that
+			// gate so the lead's "we're done" actually ends the round.
+			openFloorConfig: {
+				maxTurns: 6,
+				minRounds: 2,
+				maxSpeakerRepeats: 2,
+				endVoteThreshold: 0.5,
+			},
+		});
+
+		expect(captured.map((c) => c.slug)).toEqual(["ariadne"]);
+		expect(result.turns).toBe(1);
+	});
+
+	test("chain intent: explicit handoff interleaves with the queue, not replaces it", async () => {
+		const captured: CapturedSpawn[] = [];
+		// "ariadne, update mycroft" with ariadne re-routing to scout first.
+		// Expected order: ariadne (lead) → scout (explicit) → mycroft (queued).
+		const spawn = fakeSpawn(captured, {
+			ariadne:
+				'A. {"action":"address","slug":"scout","reason":"data first"}',
+			scout: "data update.",
+			mycroft: "thanks, end.",
+		});
+		const { ctx } = makeContext("/tmp/test", spawn);
+		const minds = new Map<string, MindSpec>([
+			["ariadne", makeMindSpec("ariadne")],
+			["mycroft", makeMindSpec("mycroft", 1)],
+			["scout", makeMindSpec("scout", 2)],
+		]);
+
+		const result = await executeStrategy({
+			mode: "open-floor",
+			userMessage: "ariadne, update mycroft on QA",
+			mindsBySlug: minds,
+			participantOrder: ["ariadne", "mycroft", "scout"],
+			roundHistory: [],
+			context: ctx,
+			openFloorConfig: {
+				maxTurns: 6,
+				minRounds: 1,
+				maxSpeakerRepeats: 2,
+				endVoteThreshold: 0.5,
+			},
+		});
+
+		expect(captured.map((c) => c.slug)).toEqual([
+			"ariadne",
+			"scout",
+			"mycroft",
+		]);
+		expect(result.turns).toBe(3);
+		// Scout sees ariadne's reason (peer address); mycroft sees scout
+		// (chain handoff, no peer reason).
+		const scoutPrompt = captured[1].prompt;
+		const mycroftPrompt = captured[2].prompt;
+		expect(scoutPrompt).toContain('<addressed-to-you sender="ariadne"');
+		expect(scoutPrompt).toContain("data first");
+		expect(mycroftPrompt).toContain('<addressed-to-you sender="scout"/>');
+	});
+
+	test("sticky single: blank follow-up inherits the prior addressed mind", async () => {
+		const captured: CapturedSpawn[] = [];
+		// Operator addressed ariadne in round 1; this round is the natural
+		// follow-up "what are your responsibilities?" with no slug. Without
+		// stickiness, leastSpoken would pull mycroft in first.
+		const spawn = fakeSpawn(captured, {
+			ariadne: "I keep the workspace operationally sane.",
+			mycroft: "should not run",
+		});
+		const { ctx, events } = makeContext("/tmp/test", spawn);
+		const minds = new Map<string, MindSpec>([
+			["ariadne", makeMindSpec("ariadne")],
+			["mycroft", makeMindSpec("mycroft", 1)],
+		]);
+
+		const result = await executeStrategy({
+			mode: "open-floor",
+			userMessage: "what are your responsibilities?",
+			mindsBySlug: minds,
+			participantOrder: ["ariadne", "mycroft"],
+			roundHistory: [
+				{ speaker: "user", content: "ariadne, can you introduce yourself?" },
+				{ speaker: "ariadne", content: "At your service." },
+			],
+			context: ctx,
+			openFloorConfig: {
+				maxTurns: 6,
+				minRounds: 1,
+				maxSpeakerRepeats: 2,
+				endVoteThreshold: 0.5,
+			},
+		});
+
+		expect(captured.map((c) => c.slug)).toEqual(["ariadne"]);
+		expect(result.turns).toBe(1);
+		const openDecision = events.find(
+			(e) =>
+				e.type === "moderator-decision" &&
+				(e as { action: string }).action === "open",
+		) as { direction?: string } | undefined;
+		// Audit line tags the inheritance so the operator can see that the
+		// system inferred a continuation rather than picked it from the
+		// current message.
+		expect(openDecision?.direction).toBe(
+			"Routed: single → ariadne (continued).",
+		);
+	});
+
+	test("sticky chain: blank follow-up inherits the prior chain", async () => {
+		const captured: CapturedSpawn[] = [];
+		const spawn = fakeSpawn(captured, {
+			ariadne: "still no anomalies on my side.",
+			mycroft: "data still looks clean.",
+		});
+		const { ctx, events } = makeContext("/tmp/test", spawn);
+		const minds = new Map<string, MindSpec>([
+			["ariadne", makeMindSpec("ariadne")],
+			["mycroft", makeMindSpec("mycroft", 1)],
+			["scout", makeMindSpec("scout", 2)],
+		]);
+
+		await executeStrategy({
+			mode: "open-floor",
+			userMessage: "anything new since?",
+			mindsBySlug: minds,
+			participantOrder: ["ariadne", "mycroft", "scout"],
+			roundHistory: [
+				{ speaker: "user", content: "ariadne, brief mycroft on the QA work" },
+				{ speaker: "ariadne", content: "..." },
+				{ speaker: "mycroft", content: "..." },
+			],
+			context: ctx,
+			openFloorConfig: {
+				maxTurns: 6,
+				minRounds: 1,
+				maxSpeakerRepeats: 2,
+				endVoteThreshold: 0.5,
+			},
+		});
+
+		// Chain rebuilds: ariadne first, then mycroft drained from queue.
+		// scout (uninvolved in the prior round) does not get pulled in.
+		expect(captured.map((c) => c.slug)).toEqual(["ariadne", "mycroft"]);
+		const openDecision = events.find(
+			(e) =>
+				e.type === "moderator-decision" &&
+				(e as { action: string }).action === "open",
+		) as { direction?: string } | undefined;
+		expect(openDecision?.direction).toBe(
+			"Routed: chain → ariadne → mycroft (continued).",
+		);
+	});
+
+	test("explicit broadcast token in current message overrides prior single", async () => {
+		const captured: CapturedSpawn[] = [];
+		// Prior round was single-ariadne. Current opens "team, …" — explicit
+		// broadcast token must break stickiness even though there are no
+		// slugs in the current message.
+		const spawn = fakeSpawn(captured, {
+			ariadne: 'A. {"action":"end","reason":"done"}',
+			mycroft: 'M. {"action":"end","reason":"done"}',
+		});
+		const { ctx, events } = makeContext("/tmp/test", spawn);
+		const minds = new Map<string, MindSpec>([
+			["ariadne", makeMindSpec("ariadne")],
+			["mycroft", makeMindSpec("mycroft", 1)],
+		]);
+
+		await executeStrategy({
+			mode: "open-floor",
+			userMessage: "team, what's the status",
+			mindsBySlug: minds,
+			participantOrder: ["ariadne", "mycroft"],
+			roundHistory: [
+				{ speaker: "user", content: "ariadne, status?" },
+				{ speaker: "ariadne", content: "..." },
+			],
+			context: ctx,
+			openFloorConfig: {
+				maxTurns: 4,
+				minRounds: 1,
+				maxSpeakerRepeats: 2,
+				endVoteThreshold: 0.5,
+			},
+		});
+
+		// Both speakers run (broadcast loop), and there's no "open" decision
+		// emitted because no userLead and no explicit openerSlug.
+		expect(captured.map((c) => c.slug).sort()).toEqual(["ariadne", "mycroft"]);
+		const openDecision = events.find(
+			(e) =>
+				e.type === "moderator-decision" &&
+				(e as { action: string }).action === "open",
+		);
+		expect(openDecision).toBeUndefined();
+	});
+
+	test("naming a new slug overrides a sticky lead from the prior round", async () => {
+		const captured: CapturedSpawn[] = [];
+		const spawn = fakeSpawn(captured, {
+			mycroft: "here's the engineering view.",
+			ariadne: "should not run",
+		});
+		const { ctx, events } = makeContext("/tmp/test", spawn);
+		const minds = new Map<string, MindSpec>([
+			["ariadne", makeMindSpec("ariadne")],
+			["mycroft", makeMindSpec("mycroft", 1)],
+		]);
+
+		await executeStrategy({
+			mode: "open-floor",
+			userMessage: "mycroft, your turn — what do you think?",
+			mindsBySlug: minds,
+			participantOrder: ["ariadne", "mycroft"],
+			roundHistory: [
+				{ speaker: "user", content: "ariadne, what's the weather?" },
+				{ speaker: "ariadne", content: "Fine." },
+			],
+			context: ctx,
+			openFloorConfig: {
+				maxTurns: 6,
+				minRounds: 1,
+				maxSpeakerRepeats: 2,
+				endVoteThreshold: 0.5,
+			},
+		});
+
+		// Current message names mycroft → fresh single intent, no inheritance.
+		expect(captured.map((c) => c.slug)).toEqual(["mycroft"]);
+		const openDecision = events.find(
+			(e) =>
+				e.type === "moderator-decision" &&
+				(e as { action: string }).action === "open",
+		) as { direction?: string } | undefined;
+		// Tag is plain — no "(continued)" — because the current message
+		// itself named the lead.
+		expect(openDecision?.direction).toBe("Routed: single → mycroft.");
+	});
+
+	test("transitive stickiness reaches through a blank intermediate round", async () => {
+		const captured: CapturedSpawn[] = [];
+		const spawn = fakeSpawn(captured, {
+			ariadne: "still nothing to add.",
+			mycroft: "should not run",
+		});
+		const { ctx } = makeContext("/tmp/test", spawn);
+		const minds = new Map<string, MindSpec>([
+			["ariadne", makeMindSpec("ariadne")],
+			["mycroft", makeMindSpec("mycroft", 1)],
+		]);
+
+		// History shows: round 1 targeted ariadne, round 2 was a blank
+		// follow-up (which would have inherited via this same rule). Round 3
+		// (current) is also blank — must walk back through round 2 to find
+		// round 1's mention.
+		await executeStrategy({
+			mode: "open-floor",
+			userMessage: "and now?",
+			mindsBySlug: minds,
+			participantOrder: ["ariadne", "mycroft"],
+			roundHistory: [
+				{ speaker: "user", content: "ariadne, what's the weather?" },
+				{ speaker: "ariadne", content: "Fine." },
+				{ speaker: "user", content: "what about tomorrow?" },
+				{ speaker: "ariadne", content: "Cloudy." },
+			],
+			context: ctx,
+			openFloorConfig: {
+				maxTurns: 6,
+				minRounds: 1,
+				maxSpeakerRepeats: 2,
+				endVoteThreshold: 0.5,
+			},
+		});
+
+		expect(captured.map((c) => c.slug)).toEqual(["ariadne"]);
+	});
+
+	test("mid-sentence 'you all' overrides prior-single stickiness", async () => {
+		const captured: CapturedSpawn[] = [];
+		// The motivating real-world case: prior round targeted ariadne; this
+		// round opens with a follow-up that asks the *room* to discuss. The
+		// "you all" phrase fires explicit-broadcast and breaks stickiness,
+		// even though it's mid-sentence rather than a leading "team,".
+		const spawn = fakeSpawn(captured, {
+			ariadne: 'A. {"action":"end","reason":"done"}',
+			mycroft: 'M. {"action":"end","reason":"done"}',
+		});
+		const { ctx, events } = makeContext("/tmp/test", spawn);
+		const minds = new Map<string, MindSpec>([
+			["ariadne", makeMindSpec("ariadne")],
+			["mycroft", makeMindSpec("mycroft", 1)],
+		]);
+
+		await executeStrategy({
+			mode: "open-floor",
+			userMessage:
+				"okay I'd like for you all to discuss our project and ensure your understanding is the same.",
+			mindsBySlug: minds,
+			participantOrder: ["ariadne", "mycroft"],
+			roundHistory: [
+				{ speaker: "user", content: "ariadne, do you understand jarvis's role?" },
+				{ speaker: "ariadne", content: "Yes — engineering partner." },
+			],
+			context: ctx,
+			openFloorConfig: {
+				maxTurns: 4,
+				minRounds: 1,
+				maxSpeakerRepeats: 2,
+				endVoteThreshold: 0.5,
+			},
+		});
+
+		// Broadcast loop: both speakers run, no "Routed: single (continued)"
+		// audit because explicit broadcast won over stickiness.
+		expect(captured.map((c) => c.slug).sort()).toEqual(["ariadne", "mycroft"]);
+		const openDecision = events.find(
+			(e) =>
+				e.type === "moderator-decision" &&
+				(e as { action: string }).action === "open",
+		);
+		expect(openDecision).toBeUndefined();
+	});
+
+	test("@<slug> direct-address rounds in history do not establish stickiness (regression)", async () => {
+		const captured: CapturedSpawn[] = [];
+		// Codex review caught this: a prior @jarvis round persists as
+		// "@jarvis …" in transcript, and the inheritance path was reading
+		// it back as a sticky single target on the next open-floor turn —
+		// turning the documented one-shot bypass into multi-turn routing.
+		const spawn = fakeSpawn(captured, {
+			ariadne: 'A. {"action":"end","reason":"done"}',
+			jarvis: 'J. {"action":"end","reason":"done"}',
+		});
+		const { ctx, events } = makeContext("/tmp/test", spawn);
+		const minds = new Map<string, MindSpec>([
+			["ariadne", makeMindSpec("ariadne")],
+			["jarvis", makeMindSpec("jarvis", 1)],
+		]);
+
+		await executeStrategy({
+			mode: "open-floor",
+			userMessage: "what about the risks?",
+			mindsBySlug: minds,
+			participantOrder: ["ariadne", "jarvis"],
+			roundHistory: [
+				{ speaker: "user", content: "@jarvis quick question" },
+				{ speaker: "jarvis", content: "Answer." },
+			],
+			context: ctx,
+			openFloorConfig: {
+				maxTurns: 4,
+				minRounds: 1,
+				maxSpeakerRepeats: 2,
+				endVoteThreshold: 0.5,
+			},
+		});
+
+		// Broadcast intent: both speakers run, no "open" decision because the
+		// @-bypass round was skipped during the inheritance walk.
+		expect(captured.map((c) => c.slug).sort()).toEqual(["ariadne", "jarvis"]);
+		const openDecision = events.find(
+			(e) =>
+				e.type === "moderator-decision" &&
+				(e as { action: string }).action === "open",
+		);
+		expect(openDecision).toBeUndefined();
+	});
+
+	test("explicit broadcast in history resets stickiness for subsequent blanks", async () => {
+		const captured: CapturedSpawn[] = [];
+		const spawn = fakeSpawn(captured, {
+			ariadne: 'A. {"action":"end","reason":"done"}',
+			mycroft: 'M. {"action":"end","reason":"done"}',
+		});
+		const { ctx, events } = makeContext("/tmp/test", spawn);
+		const minds = new Map<string, MindSpec>([
+			["ariadne", makeMindSpec("ariadne")],
+			["mycroft", makeMindSpec("mycroft", 1)],
+		]);
+
+		// History: round 1 targeted ariadne, round 2 was an explicit broadcast
+		// ("everyone, …"). Round 3 (current) is blank. The walk must stop at
+		// round 2's broadcast and NOT inherit ariadne from round 1.
+		await executeStrategy({
+			mode: "open-floor",
+			userMessage: "follow-up?",
+			mindsBySlug: minds,
+			participantOrder: ["ariadne", "mycroft"],
+			roundHistory: [
+				{ speaker: "user", content: "ariadne, status?" },
+				{ speaker: "ariadne", content: "Fine." },
+				{ speaker: "user", content: "everyone, what's next?" },
+				{ speaker: "ariadne", content: "..." },
+				{ speaker: "mycroft", content: "..." },
+			],
+			context: ctx,
+			openFloorConfig: {
+				maxTurns: 4,
+				minRounds: 1,
+				maxSpeakerRepeats: 2,
+				endVoteThreshold: 0.5,
+			},
+		});
+
+		// Broadcast intent: both speakers run, no "open" decision.
+		expect(captured.map((c) => c.slug).sort()).toEqual(["ariadne", "mycroft"]);
+		const openDecision = events.find(
+			(e) =>
+				e.type === "moderator-decision" &&
+				(e as { action: string }).action === "open",
+		);
+		expect(openDecision).toBeUndefined();
+	});
+
 	test("aborts cleanly partway through a round", async () => {
 		const captured: CapturedSpawn[] = [];
 		const ac = new AbortController();

@@ -29,6 +29,7 @@ import {
 import { CHAIRMAN_SLUG } from "./prompts.ts";
 import {
 	ROOM_CUSTOM_TYPES,
+	type RoomNoticeLevel,
 	type RoomStateView,
 	formatDurationMs,
 	mindSpeechRenderer,
@@ -37,6 +38,7 @@ import {
 	type ParticipantStatus,
 	paletteIndexForSlug,
 	renderParticipantBarLines,
+	renderRoomNoticeLine,
 	roundMetricsRenderer,
 	userRoomMessageRenderer,
 } from "./ui.ts";
@@ -67,7 +69,11 @@ const STATE_STREAM = ROOM_STATE_CUSTOM_TYPE;
 const STATUS_KEY = "room";
 const ROOM_STATUS_ICON = "\u{F0C0}"; // nf-fa-users
 const PARTICIPANT_WIDGET_KEY = "room-stage";
+const NOTICE_WIDGET_KEY = "room-notice";
+const NOTICE_TTL_MS = 8000;
 const SPINNER_FRAMES = ["·", "•", "●", "•"];
+
+const PARTICIPANT_TICK_MS = 120;
 
 export default function (pi: ExtensionAPI) {
 	let activeRoom: RoomState | undefined;
@@ -75,6 +81,8 @@ export default function (pi: ExtensionAPI) {
 	let participantTrackers: ParticipantTracker[] = [];
 	let statusInterval: ReturnType<typeof setInterval> | undefined;
 	let activeRoomStartedAt: string | undefined;
+	let participantSpinnerFrame = 0;
+	let lastRoomStatusTickAt = 0;
 
 	pi.registerMessageRenderer(
 		ROOM_CUSTOM_TYPES.userMessage,
@@ -100,6 +108,55 @@ export default function (pi: ExtensionAPI) {
 		(message, options, theme: any) =>
 			roundMetricsRenderer(message as never, options, theme),
 	);
+
+	let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+
+	// Inline room notice for lifecycle events tied to the conversation flow
+	// (activation, close, halt, leave, director override, /next, /inject).
+	// Renders as a transient widget anchored above the editor (next to the
+	// participant bar) instead of a top-of-terminal toast. Auto-clears after
+	// NOTICE_TTL_MS so stale notices don't pile up. Headless callers fall back
+	// to console output via notify().
+	function emitRoomNotice(
+		ctx: Pick<RoomCommandContext, "hasUI" | "ui">,
+		text: string,
+		level: RoomNoticeLevel = "info",
+	): void {
+		if (!ctx.hasUI) {
+			notify(ctx, text, level);
+			return;
+		}
+		const setWidget = (
+			ctx.ui as {
+				setWidget?: (
+					key: string,
+					content: string[] | undefined,
+					options?: { placement?: "aboveEditor" | "belowEditor" },
+				) => void;
+			}
+		).setWidget;
+		if (!setWidget) {
+			notify(ctx, text, level);
+			return;
+		}
+		if (noticeTimer) {
+			clearTimeout(noticeTimer);
+			noticeTimer = undefined;
+		}
+		setWidget(NOTICE_WIDGET_KEY, [renderRoomNoticeLine(text, level)], {
+			placement: "aboveEditor",
+		});
+		noticeTimer = setTimeout(() => {
+			noticeTimer = undefined;
+			try {
+				setWidget(NOTICE_WIDGET_KEY, undefined);
+			} catch {
+				// ctx may be torn down by the time the timer fires
+			}
+		}, NOTICE_TTL_MS);
+		// Don't keep the process alive just to clear a notice.
+		(noticeTimer as { unref?: () => void }).unref?.();
+	}
 
 	function persistState(entry: RoomState): void {
 		try {
@@ -228,19 +285,35 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function buildStateView(): RoomStateView {
+		const now = Date.now();
 		const participants: ParticipantStateView[] = participantTrackers.map(
-			(p) => ({
-				slug: p.slug,
-				role: p.role,
-				status: p.status,
-				paletteIndex: p.paletteIndex,
-			}),
+			(p) => {
+				const isActive =
+					p.status === "thinking" || p.status === "speaking";
+				const elapsedMs =
+					isActive && typeof p.startedAt === "number"
+						? Math.max(0, now - p.startedAt)
+						: undefined;
+				const currentTool =
+					isActive && p.currentActivity?.label
+						? p.currentActivity.label
+						: undefined;
+				return {
+					slug: p.slug,
+					role: p.role,
+					status: p.status,
+					paletteIndex: p.paletteIndex,
+					...(elapsedMs !== undefined ? { elapsedMs } : {}),
+					...(currentTool !== undefined ? { currentTool } : {}),
+				};
+			},
 		);
 		return {
 			active: Boolean(activeRoom?.active),
 			mode: activeRoom?.mode ?? "concurrent",
 			roomLabel: activeRoom?.name ?? activeRoom?.slug,
 			participants,
+			spinnerFrame: participantSpinnerFrame,
 		};
 	}
 
@@ -311,18 +384,36 @@ export default function (pi: ExtensionAPI) {
 		if (!ctx.hasUI) return;
 		const tick = () => {
 			if (!activeRoom?.active) return;
-			const speakers = participantTrackers.filter(
+			const now = Date.now();
+			const anyActive = participantTrackers.some(
 				(p) => p.status === "speaking" || p.status === "thinking",
 			);
-			const elapsed = formatDurationMs(Date.now() - getRoundStartedAt());
-			let detail = `${speakers.length} active`;
-			if (speakers.length === 1) detail = speakers[0].slug;
-			setRoomStatus(ctx, activeRoom, `${detail} · ${elapsed}`);
+			// Advance the spinner only while a mind is actively working —
+			// keeps the participant bar still while everyone is done/ready.
+			if (anyActive) {
+				participantSpinnerFrame =
+					(participantSpinnerFrame + 1) % 1_000_000;
+				syncParticipantWidget(ctx);
+			}
+			// Powerline elapsed only changes once per second; gate it so we
+			// don't churn setStatus 8x faster than the visible value updates.
+			if (now - lastRoomStatusTickAt >= 1000) {
+				lastRoomStatusTickAt = now;
+				const speakers = participantTrackers.filter(
+					(p) => p.status === "speaking" || p.status === "thinking",
+				);
+				const elapsed = formatDurationMs(now - getRoundStartedAt());
+				let detail = `${speakers.length} active`;
+				if (speakers.length === 1) detail = speakers[0].slug;
+				setRoomStatus(ctx, activeRoom, `${detail} · ${elapsed}`);
+			}
 		};
+		lastRoomStatusTickAt = 0;
 		tick();
-		statusInterval = setInterval(tick, 1000) as unknown as ReturnType<
-			typeof setInterval
-		>;
+		statusInterval = setInterval(
+			tick,
+			PARTICIPANT_TICK_MS,
+		) as unknown as ReturnType<typeof setInterval>;
 	}
 
 	function stopStatusTicker(): void {
@@ -330,6 +421,8 @@ export default function (pi: ExtensionAPI) {
 			clearInterval(statusInterval);
 			statusInterval = undefined;
 		}
+		participantSpinnerFrame = 0;
+		lastRoomStatusTickAt = 0;
 	}
 
 	const orchestrator: TurnOrchestrator = createTurnOrchestrator({
@@ -489,7 +582,7 @@ export default function (pi: ExtensionAPI) {
 				notify(ctx, "No in-flight round to halt.", "warning");
 				return;
 			}
-			notify(ctx, "Halt sent. In-flight minds are wrapping up.", "info");
+			emitRoomNotice(ctx, "Halt sent. In-flight minds are wrapping up.");
 		},
 	});
 
@@ -543,7 +636,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			orchestrator.setNextSpeaker(slug);
-			notify(ctx, `Director override: next speaker = ${slug}.`, "info");
+			emitRoomNotice(ctx, `Director override: next speaker = ${slug}.`);
 		},
 	});
 
@@ -573,10 +666,9 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			orchestrator.setDirectionInjection(text);
-			notify(
+			emitRoomNotice(
 				ctx,
 				`Director note queued for the next speaker: "${text}".`,
-				"info",
 			);
 		},
 	});
@@ -828,10 +920,9 @@ export default function (pi: ExtensionAPI) {
 		setRoomStatus(ctx, activeRoom);
 		syncParticipantWidget(ctx);
 		syncObservatoryLens(ctx.cwd);
-		notify(
+		emitRoomNotice(
 			ctx,
 			`${describeActiveRoom(activeRoom, ctx.cwd)} Loaded ${orchestrator.getDiskTranscriptCount()} prior turn${orchestrator.getDiskTranscriptCount() === 1 ? "" : "s"}. Use /leave to stop routing, or /detach to rewind and preserve this room as an artifact.`,
-			"info",
 		);
 	}
 
@@ -899,7 +990,7 @@ export default function (pi: ExtensionAPI) {
 		if (activeRoom?.slug === targetSlug) {
 			await leaveRoom(ctx, "saved room closed");
 		}
-		notify(ctx, `Closed saved room "${targetSlug}".`, "info");
+		emitRoomNotice(ctx, `Closed saved room "${targetSlug}".`);
 	}
 
 	async function activateRoom(
@@ -1009,10 +1100,9 @@ export default function (pi: ExtensionAPI) {
 		setRoomStatus(ctx, activeRoom);
 		syncParticipantWidget(ctx);
 		syncObservatoryLens(ctx.cwd);
-		notify(
+		emitRoomNotice(
 			ctx,
 			`${describeActiveRoom(activeRoom, ctx.cwd)}${savedNote} Use /leave to stop routing, or /detach to rewind and preserve this room as an artifact.`,
-			"info",
 		);
 	}
 
@@ -1072,10 +1162,9 @@ export default function (pi: ExtensionAPI) {
 			activeRoom ?? latestRoomState(ctx.sessionManager.getEntries());
 		const inactive = buildInactiveRoomState(previous, reason);
 		tearDownActiveRoom(ctx, inactive);
-		notify(
+		emitRoomNotice(
 			ctx,
 			"Room off. Conversation continues in this session.",
-			"info",
 		);
 	}
 
@@ -1108,15 +1197,14 @@ export default function (pi: ExtensionAPI) {
 				withSession: (replacementCtx) => {
 					setRoomStatus(replacementCtx, undefined);
 					syncParticipantWidget(replacementCtx);
-					notify(
+					emitRoomNotice(
 						replacementCtx,
 						`Detached from room. Session rewound to before activation; the room round is preserved as an artifact.`,
-						"info",
 					);
 				},
 			});
 			if (result.cancelled) {
-				notify(ctx, "Detach cancelled.", "info");
+				emitRoomNotice(ctx, "Detach cancelled.");
 			}
 		} catch (error) {
 			notify(
@@ -1239,7 +1327,10 @@ export default function (pi: ExtensionAPI) {
 		setRoomStatus(ctx, activeRoom);
 		syncParticipantWidget(ctx);
 		syncObservatoryLens(ctx.cwd);
-		notify(ctx, `${message} ${describeActiveRoom(activeRoom, ctx.cwd)}`, "info");
+		emitRoomNotice(
+			ctx,
+			`${message} ${describeActiveRoom(activeRoom, ctx.cwd)}`,
+		);
 	}
 }
 

@@ -25,6 +25,7 @@ import {
 	buildChairmanPersona,
 	CHAIRMAN_SLUG,
 	type ChamberHistoryTurn,
+	stripControlJson,
 } from "./prompts.ts";
 import {
 	type DirectorOverrides,
@@ -134,9 +135,14 @@ export function createTurnOrchestrator(
 		messageId: string,
 	): void {
 		try {
+			// Strip the optional `{action:"address"|"pass"|"end"}` control tail
+			// from the user-visible body. The tail is still parsed for routing
+			// and rendered by the moderator-decision line below the turn, so
+			// showing the raw JSON in the chat is duplicate noise. Persisted
+			// transcript and details keep the raw text for replay/re-parse.
 			pi.sendMessage<MindSpeechDetails>({
 				customType: ROOM_CUSTOM_TYPES.mindSpeech,
-				content: text,
+				content: stripControlJson(text),
 				display: true,
 				details: { ...details, messageId } as MindSpeechDetails & {
 					messageId: string;
@@ -195,7 +201,55 @@ export function createTurnOrchestrator(
 	): void {
 		const trackers = deps.getParticipantTrackers();
 		const tracker = trackers.find((p) => p.slug === slug);
-		if (tracker) tracker.status = status;
+		if (tracker) {
+			const wasActive =
+				tracker.status === "thinking" || tracker.status === "speaking";
+			const willBeActive = status === "thinking" || status === "speaking";
+			if (willBeActive && !wasActive) {
+				tracker.startedAt = Date.now();
+			} else if (!willBeActive) {
+				tracker.startedAt = undefined;
+				// Tool activity is stamped while the child Pi is producing the
+				// turn. Clearing on leave keeps the bar from displaying a
+				// stale "running bash" hint after the mind is already done.
+				tracker.currentActivity = undefined;
+			}
+			tracker.status = status;
+		}
+		deps.syncParticipantWidget(ctx);
+	}
+
+	/**
+	 * Surface the child Pi's tool activity in the participant bar. The child
+	 * runs as a print-mode JSON Pi and emits NDJSON events on stdout; we
+	 * subscribe via the `onEvent` escape hatch in spawnMind and mirror the
+	 * latest tool name (plus a meaningful arg snippet) onto the speaker's
+	 * tracker.
+	 *
+	 * We do NOT clear on `tool_execution_end` — keeping the last tool visible
+	 * until the next one starts (or the speaker finishes) gives the operator
+	 * a stable readout of "what jarvis is doing right now" instead of a
+	 * flash of empty between rapid tool calls.
+	 */
+	function onChildEvent(
+		slug: string,
+		event: { type: string; toolName?: unknown; args?: unknown },
+		ctx: RoomCommandContext,
+	): void {
+		if (event.type !== "tool_execution_start") return;
+		const tool =
+			typeof event.toolName === "string" && event.toolName.length > 0
+				? event.toolName
+				: undefined;
+		if (!tool) return;
+		const trackers = deps.getParticipantTrackers();
+		const tracker = trackers.find((p) => p.slug === slug);
+		if (!tracker) return;
+		tracker.currentActivity = {
+			tool,
+			label: formatToolActivityLabel(tool, event.args),
+			startedAt: Date.now(),
+		};
 		deps.syncParticipantWidget(ctx);
 	}
 
@@ -249,17 +303,14 @@ export function createTurnOrchestrator(
 		ctx: Pick<RoomCommandContext, "sessionManager">,
 		maxRounds = 2,
 	): ChamberHistoryTurn[] {
-		const sessionRounds = buildRoomHistoryFromEntries(
-			ctx.sessionManager.getEntries(),
-			maxRounds,
-		);
-		const need = Math.max(0, maxRounds - sessionRounds.length);
-		const diskPicked = need > 0 ? activeDiskTranscript.slice(-need) : [];
+		// Prefer disk-sourced rounds: saved rooms persist each completed round
+		// to .pi/rooms/<slug>/transcript.jsonl with full per-speaker fidelity.
+		// Disk wins when available because it preserves per-mind attribution;
+		// session entries collapse the room's responses into a single flat
+		// "room" blob.
+		const diskRounds = activeDiskTranscript.slice(-maxRounds);
 		const turns: ChamberHistoryTurn[] = [];
-		// Disk-sourced rounds first (older), then session-sourced (more recent).
-		// Disk turns expose per-speaker fidelity; session turns are flat blobs
-		// because Pi session entries don't carry per-speaker attribution.
-		for (const dt of diskPicked) {
+		for (const dt of diskRounds) {
 			turns.push({ speaker: "user", content: dt.user });
 			for (const inner of dt.turns) {
 				turns.push({
@@ -270,9 +321,20 @@ export function createTurnOrchestrator(
 				});
 			}
 		}
-		for (const sr of sessionRounds) {
-			turns.push({ speaker: "user", content: sr.user });
-			turns.push({ speaker: "room", content: sr.assistant });
+		// Fall back to session entries only for the rounds disk doesn't cover
+		// (e.g., unsaved one-off rooms have no disk transcript). Without this
+		// guard, saved-room rounds present in BOTH session entries and disk
+		// would be inserted twice in different formats.
+		const need = Math.max(0, maxRounds - diskRounds.length);
+		if (need > 0) {
+			const sessionRounds = buildRoomHistoryFromEntries(
+				ctx.sessionManager.getEntries(),
+				need,
+			);
+			for (const sr of sessionRounds) {
+				turns.push({ speaker: "user", content: sr.user });
+				turns.push({ speaker: "room", content: sr.assistant });
+			}
 		}
 		return turns;
 	}
@@ -339,6 +401,7 @@ export function createTurnOrchestrator(
 				signal: req.signal,
 				onDelta: req.onDelta,
 				onAttemptStart: req.onAttemptStart,
+				onEvent: (event) => onChildEvent(req.slug, event, ctx),
 				noChildExtensions: true,
 			});
 
@@ -766,4 +829,45 @@ export function createTurnOrchestrator(
 			lastRoomMetrics,
 		}),
 	};
+}
+
+const ACTIVITY_LABEL_MAX = 40;
+
+/**
+ * Format a one-line activity hint for the participant bar from the child
+ * Pi's `tool_execution_start` args. Shows the most operator-relevant field
+ * per built-in tool (path / command / pattern); falls back to the tool name
+ * alone when args are missing or unrecognized.
+ *
+ * Truncation strategy:
+ * - Paths tail-truncate (preserve filename).
+ * - Commands and patterns head-truncate (preserve the start of intent).
+ *
+ * Exported for unit tests; not used outside this module.
+ */
+export function formatToolActivityLabel(
+	toolName: string,
+	args: unknown,
+): string {
+	if (!args || typeof args !== "object") return toolName;
+	const a = args as Record<string, unknown>;
+	let detail: string | undefined;
+	let isPath = false;
+	if (typeof a.path === "string" && a.path.length > 0) {
+		detail = a.path;
+		isPath = true;
+	} else if (typeof a.command === "string" && a.command.length > 0) {
+		detail = a.command.split("\n")[0]?.trim() ?? a.command;
+	} else if (typeof a.pattern === "string" && a.pattern.length > 0) {
+		detail = a.pattern;
+	}
+	if (!detail) return toolName;
+	if (detail.length > ACTIVITY_LABEL_MAX) {
+		if (isPath) {
+			detail = `…${detail.slice(detail.length - (ACTIVITY_LABEL_MAX - 1))}`;
+		} else {
+			detail = `${detail.slice(0, ACTIVITY_LABEL_MAX - 1)}…`;
+		}
+	}
+	return `${toolName} ${detail}`;
 }

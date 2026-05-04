@@ -50,4 +50,16 @@ export type ParticipantTracker = {
 	role: "speaker" | "moderator";
 	status: ParticipantStatus;
 	paletteIndex: number;
+	/** Timestamp when this participant entered the current thinking/speaking
+	 * window. Cleared when status leaves the active range. Used by the
+	 * participant bar to render per-mind elapsed time. */
+	startedAt?: number;
+	/** Most-recent tool the child Pi started executing on this mind's behalf.
+	 * `tool` is the bare tool name; `label` is the formatted display string
+	 * (tool name + path/command/pattern snippet) used in the participant
+	 * bar. Stays visible after `tool_execution_end` so the operator can read
+	 * what it just ran; replaced when the next tool starts; cleared when
+	 * the mind leaves the active state. Undefined when the mind is not
+	 * actively using tools (pure model output, or not active). */
+	currentActivity?: { tool: string; label: string; startedAt: number };
 };

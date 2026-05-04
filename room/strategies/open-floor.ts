@@ -8,12 +8,28 @@
  * - soft close: end-vote ratio ≥ `endVoteThreshold` after `minRounds` met
  * - abort: `/halt` via the AbortSignal
  *
+ * The operator's user message also shapes routing. `detectUserAddressMentions`
+ * returns an ordered list of named participants and the loop selects one of
+ * three sub-policies:
+ * - `broadcast` (no slugs named) — full discussion loop with the leastSpoken
+ *   fallback and end-vote gate.
+ * - `single` (one slug named) — lead speaks, round closes unless they
+ *   explicitly hand off via `{action:"address"}`.
+ * - `chain` (two+ slugs named) — lead first, then the queued slugs each
+ *   speak with an `<addressed-to-you>` block; round closes when the queue
+ *   drains. End votes close all non-broadcast intents immediately.
+ *
  * An optional synthesizer (named via `input.synthesisConfig.mode`) closes
  * the round with a recap. Routing fallbacks (self-address, unknown slug,
  * repeat-cap) all emit `notifyWarning` so config and modeling problems
  * surface to the operator instead of silently rerouting.
  */
 
+import {
+	detectUserAddressMentions,
+	inheritedAddressMentions,
+	isExplicitBroadcast,
+} from "../core.ts";
 import {
 	buildOpenFloorOpenerPrompt,
 	buildSpeakerPrompt,
@@ -34,7 +50,7 @@ const DEFAULT_OPEN_FLOOR_CONFIG: OpenFloorConfig = {
 	maxTurns: 6,
 	minRounds: 1,
 	maxSpeakerRepeats: 2,
-	endVoteThreshold: 0.5,
+	endVoteThreshold: 0.49,
 };
 
 export async function executeOpenFloor(
@@ -80,10 +96,61 @@ export async function executeOpenFloor(
 		return ratio > config.endVoteThreshold;
 	};
 
-	// ── Optional opener ──
+	// ── Routing intent + optional opener ──
 	let openerDirection: string | undefined;
 	let nextSpeakerMind: MindSpec = speakers[0];
-	if (input.openerSlug) {
+
+	// Pull the named-participant set out of the user message and pick a
+	// sub-policy. Empty set = broadcast (current open-floor behavior). One
+	// name = single (close after lead unless they hand off). Two or more =
+	// chain (lead first, then drain the queue with `addressed-to-you`
+	// framing on each handoff).
+	//
+	// Stickiness: a blank follow-up ("what about Y?" after "moneypenny, X")
+	// inherits the prior round's intent — without this, the leastSpoken
+	// fallback would pull other minds in just because the operator's reply
+	// didn't repeat the slug. An explicit broadcast token in the current
+	// message ("team, …" / "everyone, …") forces broadcast and breaks the
+	// inheritance, so the operator always has an escape hatch.
+	type RoutingIntent = "broadcast" | "single" | "chain";
+	const currentMentions = detectUserAddressMentions(
+		input.userMessage,
+		speakers,
+	);
+	const explicitBroadcast = isExplicitBroadcast(input.userMessage);
+	let userMentions: string[];
+	let intentInherited = false;
+	if (currentMentions.length > 0 || explicitBroadcast) {
+		userMentions = currentMentions;
+	} else {
+		const inherited = inheritedAddressMentions(input.roundHistory, speakers);
+		userMentions = inherited;
+		intentInherited = inherited.length > 0;
+	}
+	const intent: RoutingIntent =
+		userMentions.length === 0
+			? "broadcast"
+			: userMentions.length === 1
+				? "single"
+				: "chain";
+	const chainQueue: string[] = userMentions.slice(1);
+
+	const userLead =
+		userMentions.length > 0 ? findSpeaker(userMentions[0]) : undefined;
+	if (userLead) {
+		nextSpeakerMind = userLead;
+		const base =
+			intent === "single"
+				? `Routed: single → ${userLead.slug}`
+				: `Routed: chain → ${userMentions.join(" → ")}`;
+		const direction = intentInherited ? `${base} (continued).` : `${base}.`;
+		input.context.emitModeratorDecision(input.openerSlug ?? userLead.slug, {
+			action: "open",
+			phase: "open",
+			nextSpeaker: userLead.slug,
+			direction,
+		});
+	} else if (input.openerSlug) {
 		const opener = input.mindsBySlug.get(input.openerSlug);
 		if (opener) {
 			const prompt = buildOpenFloorOpenerPrompt({
@@ -237,9 +304,19 @@ export async function executeOpenFloor(
 		const tail = parseSpeakerAddress(result.finalText);
 		if (tail?.action === "end") {
 			endVotes.add(speaker.slug);
+			// Single & chain rounds aren't running a consensus loop — one
+			// explicit "done" is enough. Broadcast still tallies and waits
+			// for the threshold via `canCloseByEndVote`.
+			if (intent !== "broadcast") break;
 		}
 
 		if (canCloseByEndVote()) break;
+
+		// Single intent: close after the lead's turn unless they explicitly
+		// hand off to a peer. This is the core fix for the "I asked
+		// Moneypenny but Jarvis chimed in too" pattern — without it, the
+		// leastSpoken fallback would force an unrequested second speaker.
+		if (intent === "single" && tail?.action !== "address") break;
 
 		// Routing.
 		let nextPicked: MindSpec | undefined;
@@ -274,7 +351,38 @@ export async function executeOpenFloor(
 				});
 			}
 		}
+
+		// Chain intent: drain the operator-named queue when the speaker
+		// didn't explicitly hand off elsewhere. The just-finished speaker is
+		// surfaced as the addresser so the next mind engages with what was
+		// just said. Respects the repeat cap.
+		if (!nextPicked && intent === "chain" && chainQueue.length > 0) {
+			const queuedSlug = chainQueue.shift() as string;
+			const target = findSpeaker(queuedSlug);
+			const targetCount = target
+				? (speakerCounts.get(target.slug) ?? 0)
+				: 0;
+			if (target && targetCount < config.maxSpeakerRepeats) {
+				nextPicked = target;
+				addressedFrom = { slug: speaker.slug };
+				input.context.emitModeratorDecision(speaker.slug, {
+					action: "direct",
+					phase: "moderate",
+					nextSpeaker: target.slug,
+					direction: "operator-named chain",
+				});
+			} else if (target) {
+				input.context.notifyWarning?.(
+					`open-floor: chain target ${target.slug} hit the repeat cap (${config.maxSpeakerRepeats}). Closing chain.`,
+				);
+			}
+		}
+
 		if (!nextPicked) {
+			// Non-broadcast intents close here instead of forcing another
+			// speaker via leastSpoken — that fallback is what was pulling
+			// unaddressed minds into targeted asks.
+			if (intent !== "broadcast") break;
 			nextPicked = leastSpoken();
 		}
 		nextSpeakerMind = nextPicked;
