@@ -13,7 +13,7 @@ import path from "node:path";
 import { runAdjournCommand } from "./adjourn.ts";
 import type { AssembleCommandContext } from "./core.ts";
 import { resolveGenesisPaths } from "../genesis/core.ts";
-import { writeSavedRoom } from "../room/core.ts";
+import { listSavedRooms, writeSavedRoom } from "../room/core.ts";
 
 async function withTempProject<T>(
 	fn: (cwd: string) => Promise<T> | T,
@@ -357,6 +357,144 @@ describe("runAdjournCommand", () => {
 			expect(deps.audits).toHaveLength(0);
 			const last = notifications[notifications.length - 1];
 			expect(last.message).toContain("cancelled");
+		});
+	});
+
+	test("dedupes duplicate participant slugs to avoid double removal", async () => {
+		await withTempProject(async (cwd) => {
+			// Hand-roll a saved room with a duplicated participant. writeSavedRoom
+			// preserves participants verbatim, so the duplicate exercises the
+			// partitionMembers dedupe path.
+			writeMind(cwd, "neil");
+			const now = new Date().toISOString();
+			writeSavedRoom(cwd, {
+				slug: "assembly",
+				name: "Assembly",
+				mode: "open-floor",
+				participants: ["neil", "neil"],
+				createdAt: now,
+				updatedAt: now,
+				assembledBy: "assembly",
+			});
+			writeTeamLens(cwd, "assembly");
+
+			const { ctx } = makeCtx(cwd, { selectChoices: ["Adjourn"] });
+			const deps = makeDeps();
+
+			await runAdjournCommand({}, ctx, deps);
+
+			const audit = deps.audits.find(
+				(e) => e.stream === "genesis-assemble",
+			);
+			expect(audit?.entry.removedMembers).toEqual(["neil"]);
+			// And the inner per-mind audit stream should not have a duplicate entry.
+			const mindAudits = deps.audits.filter((e) => e.stream === "genesis");
+			expect(mindAudits).toHaveLength(1);
+		});
+	});
+
+	test("preserves lens and room when a member removal fails", async () => {
+		await withTempProject(async (cwd) => {
+			seedAssemblyRoom(cwd, "assembly", "Assembly", ["neil", "chris"]);
+
+			// Make `neil`'s shim path read-only so rmSync fails. We replace the
+			// parent directory with a regular file to provoke an error from
+			// rmSync(paths.shimPath, { force: true }) — `force: true` bypasses
+			// missing-file errors but not type errors.
+			const neilShim = path.join(cwd, ".pi", "agents", "neil.md");
+			// Replace neil's mind dir with a path we can't delete cleanly: lock
+			// down by removing the shim and inserting a directory in its place
+			// after the mind dir is deleted. Simpler: chmod the agents dir to 0.
+			const agentsDir = path.dirname(neilShim);
+			fs.chmodSync(agentsDir, 0o500);
+
+			const { ctx, notifications } = makeCtx(cwd, {
+				selectChoices: ["Adjourn"],
+			});
+			const deps = makeDeps();
+
+			try {
+				await runAdjournCommand({}, ctx, deps);
+			} finally {
+				// Restore so withTempProject teardown can succeed.
+				fs.chmodSync(agentsDir, 0o755);
+			}
+
+			// At least one mind removal failed → lens and room should remain.
+			expect(
+				fs.existsSync(path.join(cwd, ".pi", "rooms", "assembly")),
+			).toBe(true);
+			expect(
+				fs.existsSync(
+					path.join(cwd, ".pi", "observatory", "lenses", "assembly-team"),
+				),
+			).toBe(true);
+
+			const summary = notifications.find((n) =>
+				n.message.startsWith("ADJOURNED"),
+			);
+			expect(summary?.message).toContain("skipped (member removal failed)");
+			expect(notifications.some((n) => n.type === "warning")).toBe(true);
+		});
+	});
+
+	test("summary distinguishes removed vs already-absent members", async () => {
+		await withTempProject(async (cwd) => {
+			// Seed a room with neil + chris, but only neil has any on-disk artifacts.
+			writeMind(cwd, "neil");
+			const now = new Date().toISOString();
+			writeSavedRoom(cwd, {
+				slug: "assembly",
+				name: "Assembly",
+				mode: "open-floor",
+				participants: ["neil", "chris"],
+				createdAt: now,
+				updatedAt: now,
+				assembledBy: "assembly",
+			});
+			writeTeamLens(cwd, "assembly");
+
+			const { ctx, notifications } = makeCtx(cwd, {
+				selectChoices: ["Adjourn"],
+			});
+			const deps = makeDeps();
+
+			await runAdjournCommand({}, ctx, deps);
+
+			const summary = notifications.find((n) =>
+				n.message.startsWith("ADJOURNED"),
+			);
+			expect(summary?.message).toContain("removed:    1 mind (neil)");
+			expect(summary?.message).toContain("already absent: chris");
+
+			const audit = deps.audits.find(
+				(e) => e.stream === "genesis-assemble",
+			);
+			expect(audit?.entry.removedMembers).toEqual(["neil"]);
+			expect(audit?.entry.alreadyAbsent).toEqual(["chris"]);
+		});
+	});
+
+	test("filters assembly rooms via SavedRoomSummary marker (no per-room re-read)", async () => {
+		await withTempProject(async (cwd) => {
+			seedAssemblyRoom(cwd, "assembly", "Assembly", ["neil"]);
+			// Hand-rolled room without the marker should be excluded from picker.
+			writeMind(cwd, "alice");
+			const now = new Date().toISOString();
+			writeSavedRoom(cwd, {
+				slug: "manual",
+				name: "Manual",
+				mode: "concurrent",
+				participants: ["alice"],
+				createdAt: now,
+				updatedAt: now,
+			});
+
+			const summaries = listSavedRooms(cwd);
+			const assemblyMarked = summaries.filter(
+				(s) => s.assembledBy === "assembly",
+			);
+			expect(assemblyMarked.map((s) => s.slug)).toEqual(["assembly"]);
 		});
 	});
 });

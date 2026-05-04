@@ -77,7 +77,7 @@ export async function runAdjournCommand(
 	setStatus(ctx, "adjourning: resolving target…");
 
 	const allRooms = listSavedRooms(ctx.cwd);
-	const assemblyRooms = allRooms.filter((r) => isAssemblyRoom(ctx.cwd, r.slug));
+	const assemblyRooms = allRooms.filter((r) => r.assembledBy === "assembly");
 
 	const targetSlug = await resolveTargetSlug(
 		args.adjournSlug,
@@ -99,7 +99,7 @@ export async function runAdjournCommand(
 		setStatus(ctx, "genesis ready");
 		notify(
 			ctx,
-			`Room "${targetSlug}" wasn't created by /assembly. Use /room delete instead.`,
+			`Room "${targetSlug}" lacks the /assembly provenance marker (legacy assembly room or hand-rolled). Use /room delete to remove it.`,
 			"error",
 		);
 		return;
@@ -137,30 +137,50 @@ export async function runAdjournCommand(
 		results.push(result);
 	}
 
+	const anyMemberFailed = results.some((r) => !r.ok);
+
 	let teamLensRemoved = false;
-	try {
-		const observatoryConfig = loadObservatoryConfig(ctx.cwd);
-		const lensesRoot = resolveLensesRoot(ctx.cwd, observatoryConfig);
-		const lensResult = removeTeamStatusBoard(lensesRoot, targetSlug);
-		teamLensRemoved = lensResult.removed;
-	} catch (error) {
+	let teamLensSkipped = false;
+	let roomRemoved = false;
+	let roomSkipped = false;
+
+	if (anyMemberFailed) {
+		// Leave the lens and room in place so the operator can inspect what was
+		// partially removed and retry. Otherwise the failed mind would be
+		// orphaned with no parent room to recover the team from.
+		teamLensSkipped = true;
+		roomSkipped = true;
 		notify(
 			ctx,
-			`Could not remove team lens: ${errorMessage(error)}`,
+			"Skipped lens and room teardown because at least one member could not be removed. Re-run /assembly adjourn after resolving the failures.",
 			"warning",
 		);
-	}
+	} else {
+		try {
+			const observatoryConfig = loadObservatoryConfig(ctx.cwd);
+			const lensesRoot = resolveLensesRoot(ctx.cwd, observatoryConfig);
+			const lensResult = removeTeamStatusBoard(lensesRoot, targetSlug);
+			teamLensRemoved = lensResult.removed;
+		} catch (error) {
+			notify(
+				ctx,
+				`Could not remove team lens: ${errorMessage(error)}`,
+				"warning",
+			);
+		}
 
-	let roomRemoved = false;
-	try {
-		deleteSavedRoom(ctx.cwd, targetSlug);
-		roomRemoved = !existsSync(resolveSavedRoomPaths(ctx.cwd, targetSlug).roomDir);
-	} catch (error) {
-		notify(
-			ctx,
-			`Could not delete saved room: ${errorMessage(error)}`,
-			"error",
-		);
+		try {
+			const { roomDir } = resolveSavedRoomPaths(ctx.cwd, targetSlug);
+			const roomExistedBefore = existsSync(roomDir);
+			deleteSavedRoom(ctx.cwd, targetSlug);
+			roomRemoved = roomExistedBefore && !existsSync(roomDir);
+		} catch (error) {
+			notify(
+				ctx,
+				`Could not delete saved room: ${errorMessage(error)}`,
+				"error",
+			);
+		}
 	}
 
 	appendAdjournAudit(deps.appendEntry, room, partition, results);
@@ -172,21 +192,16 @@ export async function runAdjournCommand(
 			room,
 			partition,
 			results,
-			teamLensRemoved,
-			roomRemoved,
+			{ removed: teamLensRemoved, skipped: teamLensSkipped },
+			{ removed: roomRemoved, skipped: roomSkipped },
 		),
-		results.some((r) => !r.ok) ? "warning" : "info",
+		anyMemberFailed ? "warning" : "info",
 	);
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function isAssemblyRoom(cwd: string, slug: string): boolean {
-	const room = safeReadSavedRoom(cwd, slug);
-	return room?.assembledBy === "assembly";
-}
 
 async function resolveTargetSlug(
 	slugArg: string | undefined,
@@ -254,7 +269,11 @@ function partitionMembers(
 	allRooms: SavedRoomSummary[],
 ): MemberPartition {
 	const partition: MemberPartition = { removable: [], preserved: [] };
-	for (const slug of target.participants) {
+	// Dedupe: a defensive participant list could include the same slug twice;
+	// without this, the duplicate's removeMindOnce call would no-op against an
+	// already-deleted dir and pollute the results array.
+	const uniqueParticipants = Array.from(new Set(target.participants));
+	for (const slug of uniqueParticipants) {
 		const otherRooms: string[] = [];
 		for (const other of allRooms) {
 			if (other.slug === target.slug) continue;
@@ -278,16 +297,31 @@ function appendAdjournAudit(
 	results: RemoveMindOnceResult[],
 ): void {
 	try {
+		const removed = results
+			.filter(
+				(r) =>
+					r.ok && (r.removed.mind || r.removed.shim || r.removed.newspaper),
+			)
+			.map((r) => r.slug);
+		const alreadyAbsent = results
+			.filter(
+				(r) =>
+					r.ok && !r.removed.mind && !r.removed.shim && !r.removed.newspaper,
+			)
+			.map((r) => r.slug);
+		const lensWarnings = results
+			.filter((r) => r.ok && r.newspaperError)
+			.map((r) => ({ slug: r.slug, error: r.newspaperError as string }));
 		appendEntry("genesis-assemble", {
 			action: "adjourn",
 			teamSlug: room.slug,
 			teamName: room.name,
-			removedMembers: results
-				.filter((r) => r.ok)
-				.map((r) => r.slug),
+			removedMembers: removed,
+			...(alreadyAbsent.length ? { alreadyAbsent } : {}),
 			failedRemovals: results
 				.filter((r) => !r.ok)
 				.map((r) => ({ slug: r.slug, error: r.error ?? "unknown" })),
+			...(lensWarnings.length ? { lensWarnings } : {}),
 			preservedMembers: partition.preserved,
 			adjournedAt: new Date().toISOString(),
 		});
@@ -325,20 +359,46 @@ function renderAdjournConfirmation(
 	return lines.join("\n");
 }
 
+interface ArtifactOutcome {
+	removed: boolean;
+	skipped: boolean;
+}
+
+function renderArtifactStatus(outcome: ArtifactOutcome): string {
+	if (outcome.removed) return "deleted";
+	if (outcome.skipped) return "skipped (member removal failed)";
+	return "skipped (not present)";
+}
+
 function renderAdjournSummary(
 	room: SavedRoom,
 	partition: MemberPartition,
 	results: RemoveMindOnceResult[],
-	teamLensRemoved: boolean,
-	roomRemoved: boolean,
+	teamLens: ArtifactOutcome,
+	roomOutcome: ArtifactOutcome,
 ): string {
-	const succeeded = results.filter((r) => r.ok);
+	// Split results three ways: actually-removed (something existed and got
+	// deleted), already-gone (ok=true but nothing was on disk), and failed.
+	const removed = results.filter(
+		(r) => r.ok && (r.removed.mind || r.removed.shim || r.removed.newspaper),
+	);
+	const alreadyGone = results.filter(
+		(r) =>
+			r.ok && !r.removed.mind && !r.removed.shim && !r.removed.newspaper,
+	);
 	const failed = results.filter((r) => !r.ok);
+	const lensIssues = results.filter((r) => r.ok && r.newspaperError);
+
 	const lines: string[] = [];
 	lines.push(`ADJOURNED — ${room.name}`);
 	lines.push(
-		`  removed:    ${succeeded.length} mind${succeeded.length === 1 ? "" : "s"}${succeeded.length ? ` (${succeeded.map((r) => r.slug).join(", ")})` : ""}`,
+		`  removed:    ${removed.length} mind${removed.length === 1 ? "" : "s"}${removed.length ? ` (${removed.map((r) => r.slug).join(", ")})` : ""}`,
 	);
+	if (alreadyGone.length > 0) {
+		lines.push(
+			`  skipped:    ${alreadyGone.length} (already absent: ${alreadyGone.map((r) => r.slug).join(", ")})`,
+		);
+	}
 	if (partition.preserved.length > 0) {
 		lines.push(
 			`  preserved:  ${partition.preserved.length} (${partition.preserved.map((p) => p.slug).join(", ")})`,
@@ -350,8 +410,14 @@ function renderAdjournSummary(
 			lines.push(`    ${f.slug}: ${f.error ?? "unknown"}`);
 		}
 	}
-	lines.push(`  team lens:  ${teamLensRemoved ? "deleted" : "skipped (not present)"}`);
-	lines.push(`  room:       ${roomRemoved ? "deleted" : "skipped (not present)"}`);
+	if (lensIssues.length > 0) {
+		lines.push(`  lens warnings: ${lensIssues.length}`);
+		for (const l of lensIssues) {
+			lines.push(`    ${l.slug}: ${l.newspaperError}`);
+		}
+	}
+	lines.push(`  team lens:  ${renderArtifactStatus(teamLens)}`);
+	lines.push(`  room:       ${renderArtifactStatus(roomOutcome)}`);
 	return lines.join("\n");
 }
 

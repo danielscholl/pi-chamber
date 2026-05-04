@@ -633,4 +633,34 @@ describe("removeMindOnce", () => {
 			expect(audits[0].entry.source).toBe("assembly-adjourn:test-team");
 		});
 	});
+
+	test("surfaces newspaperError when the lens path is locked", async () => {
+		await withTempProject(async (cwd) => {
+			writeMindFiles(cwd, "ada");
+			// Make the per-mind newspaper lens directory read-only so the inner
+			// rmSync raises EACCES. removeMindOnce should still return ok=true
+			// (lens removal is best-effort) but the error must surface in both
+			// the result and the audit entry.
+			const lensesRoot = path.join(cwd, ".pi", "observatory", "lenses");
+			fs.chmodSync(lensesRoot, 0o500);
+
+			const audits: Array<{ stream: string; entry: Record<string, unknown> }> = [];
+			let result;
+			try {
+				result = await removeMindOnce(
+					"ada",
+					cwd,
+					DEFAULT_GENESIS_CONFIG,
+					(stream, entry) => audits.push({ stream, entry }),
+				);
+			} finally {
+				fs.chmodSync(lensesRoot, 0o755);
+			}
+
+			expect(result.ok).toBe(true);
+			expect(result.removed.newspaper).toBe(false);
+			expect(typeof result.newspaperError).toBe("string");
+			expect(audits[0].entry.newspaperError).toBe(result.newspaperError);
+		});
+	});
 });

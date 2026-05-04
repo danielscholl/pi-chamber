@@ -402,6 +402,24 @@ describe("saved room CRUD", () => {
 		});
 	});
 
+	test("listSavedRooms exposes assembledBy on the summary", () => {
+		withTempProject((cwd) => {
+			writeCompleteMind(cwd, "ariadne");
+			writeCompleteMind(cwd, "mycroft");
+			writeSavedRoom(
+				cwd,
+				makeRoom({ slug: "team-a", name: "Team A", assembledBy: "assembly" }),
+			);
+			writeSavedRoom(cwd, makeRoom({ slug: "team-b", name: "Team B" }));
+
+			const summaries = listSavedRooms(cwd);
+			const a = summaries.find((s) => s.slug === "team-a");
+			const b = summaries.find((s) => s.slug === "team-b");
+			expect(a?.assembledBy).toBe("assembly");
+			expect(b?.assembledBy).toBeUndefined();
+		});
+	});
+
 	test("deleteSavedRoom removes the room directory", () => {
 		withTempProject((cwd) => {
 			writeCompleteMind(cwd, "ariadne");

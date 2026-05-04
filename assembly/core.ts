@@ -286,10 +286,12 @@ export function parseAssembleArgs(raw: string): AssembleArgs {
 	// Adjourn subcommand: first non-flag token is exactly "adjourn".
 	// Optional second positional becomes the team slug. Anything beyond is
 	// ignored (slugs are single tokens; we don't attempt to combine them).
+	// Slugs are canonical lowercase; we lowercase here so users can type
+	// `adjourn ASSEMBLY` without getting a confusing "no saved room" error.
 	if (tokens.length > 0 && tokens[0] === "adjourn") {
 		args.mode = "adjourn";
 		if (tokens[1] && !tokens[1].startsWith("--")) {
-			args.adjournSlug = tokens[1];
+			args.adjournSlug = tokens[1].toLowerCase();
 		}
 		return args;
 	}
@@ -390,10 +392,16 @@ async function proposeTeam(
 	previous: AssembleProposal | undefined,
 	cwd: string,
 	spawnSubagent: SpawnGenesisFn,
+	options: { lockMetadata?: boolean } = {},
 ): Promise<AssembleProposal> {
-	const defaultTeamSlug = isDefaultTeamSlugAvailable(cwd)
-		? ASSEMBLE_DEFAULT_TEAM_SLUG
-		: undefined;
+	// When the user has manually edited team metadata, suppress both the prompt
+	// directive and the post-parse override so a regenerate doesn't quietly
+	// undo their choice.
+	const defaultTeamSlug = options.lockMetadata
+		? undefined
+		: isDefaultTeamSlugAvailable(cwd)
+			? ASSEMBLE_DEFAULT_TEAM_SLUG
+			: undefined;
 
 	const input: AssembleProposalInput = {
 		signals,
@@ -423,11 +431,17 @@ async function proposeTeam(
 	}
 	const proposal = parseAssembleProposalJson(result.finalText);
 
-	// Belt-and-suspenders: if the default slug was offered and is still
-	// available, override whatever the proposer picked. Keeps the simple
-	// single-team UX deterministic regardless of model variance.
+	// Belt-and-suspenders override only fires when the proposer also chose a
+	// generic team_name. If it picked a contextual name (e.g. "Strike Team"),
+	// treat that as a deliberate signal that the project demands a contextual
+	// slug — respect it, even though the prompt asked for `assembly`.
 	if (defaultTeamSlug && proposal.team_slug !== defaultTeamSlug) {
-		if (isDefaultTeamSlugAvailable(cwd)) {
+		const proposedName = proposal.team_name?.trim() ?? "";
+		const isGenericName =
+			!proposedName ||
+			proposedName.toLowerCase() ===
+				ASSEMBLE_DEFAULT_TEAM_NAME.toLowerCase();
+		if (isGenericName && isDefaultTeamSlugAvailable(cwd)) {
 			return {
 				...proposal,
 				team_slug: defaultTeamSlug,
@@ -462,6 +476,10 @@ async function runConfirmationLoop(
 	spawnSubagent: SpawnGenesisFn,
 ): Promise<AssembleProposal | undefined> {
 	let current: AssembleProposal = initial;
+	// Tracks fields the user has explicitly edited so they survive Regenerate.
+	// Locked fields are re-applied over each regenerated proposal, and the
+	// presence of any locked field suppresses the default-slug override.
+	const lockedMetadata: { team_slug?: string; team_name?: string } = {};
 	while (true) {
 		notify(ctx, renderProposal(current, signals), "info");
 		const select = ctx.ui.select;
@@ -615,6 +633,7 @@ async function runConfirmationLoop(
 					continue;
 				}
 				current = { ...current, team_name: value };
+				lockedMetadata.team_name = value;
 				notify(ctx, "Updated team name.", "info");
 				continue;
 			}
@@ -662,6 +681,7 @@ async function runConfirmationLoop(
 				continue;
 			}
 			current = { ...current, team_slug: newSlug };
+			lockedMetadata.team_slug = newSlug;
 			notify(ctx, "Updated team slug.", "info");
 			continue;
 		}
@@ -678,15 +698,26 @@ async function runConfirmationLoop(
 					)?.trim()
 				: "";
 			setStatus(ctx, "assembling: regenerating…");
+			const hasLockedMetadata =
+				lockedMetadata.team_slug !== undefined ||
+				lockedMetadata.team_name !== undefined;
 			try {
-				current = await proposeTeam(
+				let next = await proposeTeam(
 					signals,
 					args,
 					feedback || undefined,
 					current,
 					ctx.cwd,
 					spawnSubagent,
+					{ lockMetadata: hasLockedMetadata },
 				);
+				if (lockedMetadata.team_slug) {
+					next = { ...next, team_slug: lockedMetadata.team_slug };
+				}
+				if (lockedMetadata.team_name) {
+					next = { ...next, team_name: lockedMetadata.team_name };
+				}
+				current = next;
 			} catch (error) {
 				notify(ctx, `Regenerate failed: ${errorMessage(error)}`, "error");
 			}

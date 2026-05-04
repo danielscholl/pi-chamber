@@ -128,6 +128,11 @@ export type SavedRoomSummary = {
 	createdAt: string;
 	updatedAt: string;
 	problems: string[];
+	/**
+	 * Provenance marker mirrored from `SavedRoom.assembledBy` so callers can
+	 * filter without re-reading each room.json.
+	 */
+	assembledBy?: "assembly";
 };
 
 export type RoomTranscriptTurn = {
@@ -886,6 +891,9 @@ export function listSavedRooms(cwd: string): SavedRoomSummary[] {
 		if (!validation.ok) {
 			problems.push(...validation.errors);
 		}
+		const assembledBy = coerceAssembledBy(
+			(candidate as Record<string, unknown>).assembledBy,
+		);
 		summaries.push({
 			slug: candidate.slug,
 			name: candidate.name,
@@ -894,6 +902,7 @@ export function listSavedRooms(cwd: string): SavedRoomSummary[] {
 			createdAt: candidate.createdAt,
 			updatedAt: candidate.updatedAt,
 			problems,
+			...(assembledBy ? { assembledBy } : {}),
 		});
 	}
 	summaries.sort((a, b) => a.slug.localeCompare(b.slug));

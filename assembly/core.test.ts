@@ -280,6 +280,21 @@ describe("parseAssembleArgs", () => {
 		expect(parseAssembleArgs("--size=99").size).toBeUndefined();
 		expect(parseAssembleArgs("--size=abc").size).toBeUndefined();
 	});
+
+	test("lowercases adjourn slug for canonical matching", () => {
+		expect(parseAssembleArgs("adjourn ASSEMBLY")).toEqual({
+			mode: "adjourn",
+			adjournSlug: "assembly",
+			noUniverse: false,
+			scanOnly: false,
+		});
+		expect(parseAssembleArgs("adjourn Mixed-Case")).toEqual({
+			mode: "adjourn",
+			adjournSlug: "mixed-case",
+			noUniverse: false,
+			scanOnly: false,
+		});
+	});
 });
 
 describe("validateProposalForAuthoring", () => {
@@ -532,6 +547,159 @@ describe("runAssembleCommand — regenerate", () => {
 			expect(spawnCalls[1].prompt).toContain("REGENERATE NOTES");
 			expect(spawnCalls[1].prompt).toContain("lean toward lighter ops");
 			expect(authorCalls.map((c) => c.slug)).toEqual(["linus"]);
+		});
+	});
+});
+
+describe("runAssembleCommand — default-slug override", () => {
+	test("respects a contextual team_name when the model deviates from the default slug", async () => {
+		await withTempProject(async (cwd) => {
+			fs.writeFileSync(path.join(cwd, "README.md"), "x");
+			const contextual = defaultProposal({
+				team_slug: "strike-team",
+				team_name: "Strike Team",
+			});
+			const { spawn } = makeSpawnReturning([contextual]);
+			const { ctx } = makeCtx(cwd, {
+				selectChoices: ["Approve and author"],
+			});
+			const { pi } = makePi();
+			const { authorMind } = makeAuthorMind();
+
+			await runAssembleCommand("describe", ctx, {
+				pi: pi as never,
+				spawnSubagent: spawn,
+				authorMind,
+			});
+
+			const room = JSON.parse(
+				fs.readFileSync(
+					path.join(cwd, ".pi", "rooms", "strike-team", "room.json"),
+					"utf-8",
+				),
+			);
+			expect(room.name).toBe("Strike Team");
+			expect(room.slug).toBe("strike-team");
+		});
+	});
+
+	test("overrides slug when model picked a generic team_name", async () => {
+		await withTempProject(async (cwd) => {
+			fs.writeFileSync(path.join(cwd, "README.md"), "x");
+			const driftedSlug = defaultProposal({
+				team_slug: "team",
+				team_name: "Assembly",
+			});
+			const { spawn } = makeSpawnReturning([driftedSlug]);
+			const { ctx } = makeCtx(cwd, {
+				selectChoices: ["Approve and author"],
+			});
+			const { pi } = makePi();
+			const { authorMind } = makeAuthorMind();
+
+			await runAssembleCommand("describe", ctx, {
+				pi: pi as never,
+				spawnSubagent: spawn,
+				authorMind,
+			});
+
+			expect(
+				fs.existsSync(path.join(cwd, ".pi", "rooms", "assembly", "room.json")),
+			).toBe(true);
+			const room = JSON.parse(
+				fs.readFileSync(
+					path.join(cwd, ".pi", "rooms", "assembly", "room.json"),
+					"utf-8",
+				),
+			);
+			expect(room.slug).toBe("assembly");
+			expect(room.name).toBe("Assembly");
+		});
+	});
+});
+
+describe("runAssembleCommand — metadata lock through regenerate", () => {
+	test("user-edited team_slug survives a regenerate", async () => {
+		await withTempProject(async (cwd) => {
+			fs.writeFileSync(path.join(cwd, "README.md"), "x");
+			const first = defaultProposal();
+			const second = defaultProposal({
+				team_slug: "model-picked",
+				team_name: "Model Picked",
+				members: [
+					{
+						name: "Ada",
+						slug: "ada",
+						role: "lead",
+						voice: "steady",
+						voiceDescription: "engineer",
+						rationale: "covers control",
+					},
+				],
+			});
+			const { spawn } = makeSpawnReturning([first, second]);
+			const { ctx } = makeCtx(cwd, {
+				selectChoices: [
+					"Edit team metadata",
+					"team slug",
+					"Regenerate",
+					"Approve and author",
+				],
+				inputs: ["custom-team", ""],
+			});
+			const { pi } = makePi();
+			const { authorMind } = makeAuthorMind();
+
+			await runAssembleCommand("describe", ctx, {
+				pi: pi as never,
+				spawnSubagent: spawn,
+				authorMind,
+			});
+
+			const roomPath = path.join(
+				cwd,
+				".pi",
+				"rooms",
+				"custom-team",
+				"room.json",
+			);
+			expect(fs.existsSync(roomPath)).toBe(true);
+			const room = JSON.parse(fs.readFileSync(roomPath, "utf-8"));
+			expect(room.slug).toBe("custom-team");
+			expect(room.participants).toEqual(["ada"]);
+		});
+	});
+
+	test("locked metadata suppresses default-slug override on regenerate", async () => {
+		await withTempProject(async (cwd) => {
+			fs.writeFileSync(path.join(cwd, "README.md"), "x");
+			const first = defaultProposal();
+			const second = defaultProposal({
+				team_slug: "another",
+				team_name: "Another",
+			});
+			const { spawn, calls } = makeSpawnReturning([first, second]);
+			const { ctx } = makeCtx(cwd, {
+				selectChoices: [
+					"Edit team metadata",
+					"team name",
+					"Regenerate",
+					"Cancel",
+				],
+				inputs: ["My Custom Team", ""],
+			});
+			const { pi } = makePi();
+			const { authorMind } = makeAuthorMind();
+
+			await runAssembleCommand("describe", ctx, {
+				pi: pi as never,
+				spawnSubagent: spawn,
+				authorMind,
+			});
+
+			expect(calls).toHaveLength(2);
+			// Second prompt should NOT include the default-slug directive once metadata is locked.
+			expect(calls[1].prompt).not.toContain('Use "assembly" as the team_slug');
 		});
 	});
 });

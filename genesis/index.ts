@@ -1106,6 +1106,11 @@ export interface RemoveMindOnceResult {
 		newspaper: boolean;
 	};
 	error?: string;
+	/**
+	 * Lens-removal error, if any. Non-fatal — `ok` stays true even when this is
+	 * set. Surfaces silent failures so callers can include them in summaries.
+	 */
+	newspaperError?: string;
 	durationMs: number;
 }
 
@@ -1163,13 +1168,14 @@ export async function removeMindOnce(
 		return fail(`failed to remove shim: ${errorMessage(error)}`);
 	}
 
+	let newspaperError: string | undefined;
 	try {
 		const observatoryConfig = loadObservatoryConfig(paths.cwd);
 		const lensesRoot = resolveLensesRoot(paths.cwd, observatoryConfig);
 		const lensResult = removeNewspaperLens(lensesRoot, trimmed);
 		removed.newspaper = lensResult.removed;
-	} catch {
-		/* non-fatal: lens removal is best-effort, like seeding */
+	} catch (error) {
+		newspaperError = errorMessage(error);
 	}
 
 	try {
@@ -1178,6 +1184,7 @@ export async function removeMindOnce(
 			slug: trimmed,
 			...(options.source ? { source: options.source } : {}),
 			removed,
+			...(newspaperError ? { newspaperError } : {}),
 			removedAt: new Date().toISOString(),
 		});
 	} catch {
@@ -1188,6 +1195,7 @@ export async function removeMindOnce(
 		ok: true,
 		slug: trimmed,
 		removed,
+		...(newspaperError ? { newspaperError } : {}),
 		durationMs: Date.now() - startedAt,
 	};
 }
