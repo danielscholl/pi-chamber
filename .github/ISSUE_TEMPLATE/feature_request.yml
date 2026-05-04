@@ -1,0 +1,42 @@
+name: Feature request
+description: Suggest a new capability or refinement
+labels: [enhancement]
+body:
+  - type: input
+    id: feature
+    attributes:
+      label: Affected feature
+      description: Which extension would this touch?
+      placeholder: "genesis, mind, room, observatory, assembly, or new"
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and why is it awkward today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: Sketch the command, flag, or behavior you'd like. UX before implementation.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional context
+    validations:
+      required: false

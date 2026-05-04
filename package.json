@@ -40,7 +40,8 @@
   "scripts": {
     "test": "bun test",
     "typecheck": "tsc --noEmit",
-    "build": "tsc -p tsconfig.build.json"
+    "build": "tsc -p tsconfig.build.json",
+    "check": "bun run typecheck && bun test && bun run build"
   },
   "dependencies": {
     "typebox": "^1.1.24"

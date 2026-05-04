@@ -1,0 +1,90 @@
+name: Bug report
+description: Something isn't working as documented in the README or AGENTS.md
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing pi-chamber. Please fill in the fields below so the failure is reproducible.
+
+  - type: input
+    id: feature
+    attributes:
+      label: Feature
+      description: Which command/extension surfaced the bug?
+      placeholder: "/genesis, /mind, /room, /observatory, /assembly, or N/A"
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Numbered steps starting from a clean Pi session.
+      placeholder: |
+        1. `/genesis` ...
+        2. `/mind <slug>` ...
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include error messages, transcript snippets, or screenshots.
+    validations:
+      required: true
+
+  - type: input
+    id: pi-version
+    attributes:
+      label: Pi version
+      description: Output of `pi --version` (or the @mariozechner/pi-coding-agent version you're on).
+    validations:
+      required: true
+
+  - type: input
+    id: chamber-version
+    attributes:
+      label: pi-chamber version
+      description: Git SHA or tag you installed (e.g. `git:github.com/danielscholl/pi-chamber@<sha>`).
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS
+        - Linux
+        - Windows (WSL)
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: state
+    attributes:
+      label: Relevant `.pi/` state
+      description: |
+        Optional. If the bug involves persisted state, paste the relevant snippets from `.pi/minds/`,
+        `.pi/rooms/`, or `.pi/observatory/lenses/`. Redact anything sensitive.
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional context
+    validations:
+      required: false

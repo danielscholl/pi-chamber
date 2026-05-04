@@ -1,5 +1,7 @@
 # Pi Chamber
 
+[![CI](https://github.com/danielscholl/pi-chamber/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/danielscholl/pi-chamber/actions/workflows/ci.yml)
+
 A Pi extension package that bundles five composable features for the Pi coding agent: durable agent identities (Genesis minds), direct-chat into a mind, multi-mind orchestration, a TUI lens viewer, and on-demand team assembly.
 
 ```text
