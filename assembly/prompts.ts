@@ -154,7 +154,7 @@ function collectAssembleJsonCandidates(rawText: string): string[] {
 	return Array.from(new Set(candidates));
 }
 
-function validateAssembleProposal(
+export function validateAssembleProposal(
 	value: Record<string, unknown>,
 ): AssembleProposal {
 	const project = expectAssembleString(value, "project");

@@ -26,6 +26,43 @@ import type {
 	SpawnGenesisOptions,
 	SpawnGenesisResult,
 } from "../genesis/spawn.ts";
+import type { AssembleProposal } from "./prompts.ts";
+import { serializeProposalToToml } from "./proposal-toml.ts";
+
+// Build the TOML string the proposal-review editor would return on submit.
+// /assembly opens ExtensionEditorComponent prefilled with the proposal as
+// TOML; the user edits and submits — the test mock returns this string.
+function approveResult(
+	overrides: Partial<AssembleProposal> = {},
+): string {
+	const proposal: AssembleProposal = {
+		project: "A test project",
+		team_slug: "assembly",
+		team_name: "Assembly",
+		universe: "Heat",
+		rationale: "covers the gaps",
+		members: [
+			{
+				name: "Neil",
+				slug: "neil",
+				role: "lead",
+				voice: "steady",
+				voiceDescription: "calm strategist",
+				rationale: "runs point",
+			},
+			{
+				name: "Chris",
+				slug: "chris",
+				role: "executor",
+				voice: "sharp",
+				voiceDescription: "fast hands",
+				rationale: "ships",
+			},
+		],
+		...overrides,
+	};
+	return serializeProposalToToml(proposal);
+}
 
 async function withTempProject<T>(
 	fn: (cwd: string) => Promise<T> | T,
@@ -108,6 +145,14 @@ interface FakeCtxOptions {
 	hasUI?: boolean;
 	selectChoices?: Array<string | undefined>;
 	inputs?: Array<string | undefined>;
+	/**
+	 * Queue of strings/undefined that ctx.ui.custom() returns in order. Each
+	 * editor opening (description prompt, proposal review) consumes one item.
+	 * Pass undefined to simulate Esc-cancel, or a TOML/text string (built via
+	 * approveResult for the proposal review) to simulate submit. Leave unset
+	 * to simulate ui.custom being unavailable entirely.
+	 */
+	editorResults?: Array<string | undefined>;
 }
 
 interface FakeCtx {
@@ -125,6 +170,7 @@ function makeCtx(cwd: string, opts: FakeCtxOptions = {}): FakeCtx {
 	const widgetStates: Array<{ key: string; content?: string[] }> = [];
 	const selectQueue = [...(opts.selectChoices ?? [])];
 	const inputQueue = [...(opts.inputs ?? [])];
+	const editorQueue = [...(opts.editorResults ?? [])];
 	const ctx: AssembleCommandContext = {
 		cwd,
 		hasUI: opts.hasUI ?? true,
@@ -151,6 +197,26 @@ function makeCtx(cwd: string, opts: FakeCtxOptions = {}): FakeCtx {
 					content: content ? [...content] : undefined,
 				});
 			},
+			...(opts.editorResults !== undefined
+				? {
+						async custom<T>(
+							_factory: (
+								tui: unknown,
+								theme: unknown,
+								keybindings: unknown,
+								done: (result: T) => void,
+							) => unknown,
+							_opts?: { overlay?: boolean },
+						): Promise<T> {
+							if (editorQueue.length === 0) {
+								throw new Error(
+									"editorResults queue exhausted: ctx.ui.custom() called more times than expected.",
+								);
+							}
+							return editorQueue.shift() as unknown as T;
+						},
+					}
+				: {}),
 		},
 	};
 	return { ctx, notifications, selects, inputs, widgetStates };
@@ -363,8 +429,8 @@ describe("runAssembleCommand — happy path", () => {
 		await withTempProject(async (cwd) => {
 			fs.writeFileSync(path.join(cwd, "README.md"), "# Project\n\nHi.\n");
 			const { spawn, calls } = makeSpawnReturning([defaultProposal()]);
-			const { ctx, notifications } = makeCtx(cwd, {
-				selectChoices: ["Approve and author"],
+			const { ctx, widgetStates } = makeCtx(cwd, {
+				editorResults: [approveResult()],
 			});
 			const { pi, auditEntries } = makePi();
 			const { authorMind, calls: authorCalls } = makeAuthorMind();
@@ -414,10 +480,105 @@ describe("runAssembleCommand — happy path", () => {
 			expect(auditEntries[0].stream).toBe("genesis-assemble");
 			expect(auditEntries[0].entry.succeeded).toEqual(["neil", "chris"]);
 
-			// final summary contains NEXT block
-			const summary = notifications[notifications.length - 1].message;
-			expect(summary).toContain("TEAM ASSEMBLED");
-			expect(summary).toContain("/room assembly");
+			// final summary lands in the panel widget, not a toast.
+			const panelEmits = widgetStates.filter(
+				(w) => w.key === "assembly-panel" && w.content !== undefined,
+			);
+			const lastPanel = panelEmits[panelEmits.length - 1];
+			expect(lastPanel.content?.[0]).toBe("TEAM ASSEMBLED");
+			expect(lastPanel.content?.some((l) => l.includes("/room assembly"))).toBe(
+				true,
+			);
+		});
+	});
+
+	test("emits an animated working panel during the proposer wait", async () => {
+		await withTempProject(async (cwd) => {
+			fs.writeFileSync(path.join(cwd, "README.md"), "# Project\n");
+			fs.writeFileSync(path.join(cwd, "AGENTS.md"), "agents\n");
+			const { spawn } = makeSpawnReturning([defaultProposal()]);
+			const { ctx, notifications, widgetStates } = makeCtx(cwd, {
+				editorResults: [approveResult()],
+			});
+			const { pi } = makePi();
+			const { authorMind } = makeAuthorMind();
+
+			await runAssembleCommand("describe me", ctx, {
+				pi: pi as never,
+				spawnSubagent: spawn,
+				authorMind,
+			});
+
+			// The legacy multi-line "Reading project signals" header is gone —
+			// neither in toasts nor in widget content.
+			expect(
+				notifications.some((n) => n.message.includes("Reading project signals")),
+			).toBe(false);
+			expect(
+				widgetStates.some((w) =>
+					w.content?.some((line) => line.includes("Reading project signals")),
+				),
+			).toBe(false);
+
+			// At least one panel emit during the proposer wait carries the working
+			// header pattern: "<spinner> assembly | <phrase>… <s>s".
+			const panelEmits = widgetStates.filter(
+				(w) => w.key === "assembly-panel" && w.content !== undefined,
+			);
+			const hasWorkingHeader = panelEmits.some((w) =>
+				/assembly \| .+… \d+s/.test(w.content?.[0] ?? ""),
+			);
+			expect(hasWorkingHeader).toBe(true);
+
+			// The compressed signals footer rides the same emit. With README +
+			// AGENTS.md present, both should appear in the footer line.
+			const footerEmit = panelEmits.find((w) =>
+				w.content?.some(
+					(line) =>
+						line.includes("README.md") && line.includes("AGENTS.md"),
+				),
+			);
+			expect(footerEmit).toBeDefined();
+
+			// The working ticker is stopped before the proposal panel takes over.
+			// At least one dismissal (undefined content) appears in the sequence.
+			const dismissals = widgetStates.filter(
+				(w) => w.key === "assembly-panel" && w.content === undefined,
+			);
+			expect(dismissals.length).toBeGreaterThanOrEqual(1);
+		});
+	});
+
+	test("stops the working panel when the proposer fails", async () => {
+		await withTempProject(async (cwd) => {
+			fs.writeFileSync(path.join(cwd, "README.md"), "x");
+			// Spawn returns no usable JSON → proposeTeam throws.
+			const { spawn } = makeSpawnReturning([{} as never]);
+			const { ctx, notifications, widgetStates } = makeCtx(cwd, {
+				selectChoices: [],
+			});
+			const { pi } = makePi();
+			const { authorMind } = makeAuthorMind();
+
+			await runAssembleCommand("describe", ctx, {
+				pi: pi as never,
+				spawnSubagent: spawn,
+				authorMind,
+			});
+
+			// Proposer error surfaces as a toast.
+			const errorToast = notifications.find((n) =>
+				n.message.includes("Team proposer failed"),
+			);
+			expect(errorToast?.type).toBe("error");
+
+			// Widget was animated then explicitly cleared. Last widget event for
+			// the assembly panel is a dismissal (undefined content).
+			const panelEvents = widgetStates.filter(
+				(w) => w.key === "assembly-panel",
+			);
+			expect(panelEvents.length).toBeGreaterThan(0);
+			expect(panelEvents[panelEvents.length - 1].content).toBeUndefined();
 		});
 	});
 });
@@ -427,7 +588,7 @@ describe("runAssembleCommand — cancellation", () => {
 		await withTempProject(async (cwd) => {
 			fs.writeFileSync(path.join(cwd, "README.md"), "x");
 			const { spawn } = makeSpawnReturning([defaultProposal()]);
-			const { ctx } = makeCtx(cwd, { selectChoices: ["Cancel"] });
+			const { ctx } = makeCtx(cwd, { editorResults: [undefined] });
 			const { pi, auditEntries } = makePi();
 			const { authorMind, calls } = makeAuthorMind();
 
@@ -447,15 +608,25 @@ describe("runAssembleCommand — cancellation", () => {
 });
 
 describe("runAssembleCommand — drop a member", () => {
-	test("drops a member then approves; room participants exclude dropped slug", async () => {
+	test("approved proposal with one member excluded → room participants exclude that slug", async () => {
 		await withTempProject(async (cwd) => {
 			fs.writeFileSync(path.join(cwd, "README.md"), "x");
 			const { spawn } = makeSpawnReturning([defaultProposal()]);
+			// User deletes the second [[members]] block in the editor.
 			const { ctx } = makeCtx(cwd, {
-				selectChoices: [
-					"Drop a member",
-					"Chris (chris) — executor",
-					"Approve and author",
+				editorResults: [
+					approveResult({
+						members: [
+							{
+								name: "Neil",
+								slug: "neil",
+								role: "lead",
+								voice: "steady",
+								voiceDescription: "calm strategist",
+								rationale: "runs point",
+							},
+						],
+					}),
 				],
 			});
 			const { pi } = makePi();
@@ -480,18 +651,34 @@ describe("runAssembleCommand — drop a member", () => {
 });
 
 describe("runAssembleCommand — edit a member", () => {
-	test("edit role then approve; member voiceDescription unchanged", async () => {
+	test("approved proposal with edited member fields propagates to authoring", async () => {
 		await withTempProject(async (cwd) => {
 			fs.writeFileSync(path.join(cwd, "README.md"), "x");
 			const { spawn } = makeSpawnReturning([defaultProposal()]);
+			// User edits Neil's role in the TOML editor.
 			const { ctx } = makeCtx(cwd, {
-				selectChoices: [
-					"Edit a member",
-					"Neil (neil) — lead",
-					"role",
-					"Approve and author",
+				editorResults: [
+					approveResult({
+						members: [
+							{
+								name: "Neil",
+								slug: "neil",
+								role: "chief architect",
+								voice: "steady",
+								voiceDescription: "calm strategist",
+								rationale: "runs point",
+							},
+							{
+								name: "Chris",
+								slug: "chris",
+								role: "executor",
+								voice: "sharp",
+								voiceDescription: "fast hands",
+								rationale: "ships",
+							},
+						],
+					}),
 				],
-				inputs: ["chief architect"],
 			});
 			const { pi } = makePi();
 			const { authorMind, calls } = makeAuthorMind();
@@ -508,48 +695,9 @@ describe("runAssembleCommand — edit a member", () => {
 	});
 });
 
-describe("runAssembleCommand — regenerate", () => {
-	test("regenerate triggers a second proposer call with feedback context", async () => {
-		await withTempProject(async (cwd) => {
-			fs.writeFileSync(path.join(cwd, "README.md"), "x");
-			const second = defaultProposal({
-				team_slug: "round-two",
-				team_name: "Round Two",
-				members: [
-					{
-						name: "Linus",
-						slug: "linus",
-						role: "lead",
-						voice: "calm",
-						voiceDescription: "patient strategist",
-						rationale: "carries the team",
-					},
-				],
-			});
-			const { spawn, calls: spawnCalls } = makeSpawnReturning([
-				defaultProposal(),
-				second,
-			]);
-			const { ctx } = makeCtx(cwd, {
-				selectChoices: ["Regenerate", "Approve and author"],
-				inputs: ["lean toward lighter ops"],
-			});
-			const { pi } = makePi();
-			const { authorMind, calls: authorCalls } = makeAuthorMind();
-
-			await runAssembleCommand("describe", ctx, {
-				pi: pi as never,
-				spawnSubagent: spawn,
-				authorMind,
-			});
-
-			expect(spawnCalls).toHaveLength(2);
-			expect(spawnCalls[1].prompt).toContain("REGENERATE NOTES");
-			expect(spawnCalls[1].prompt).toContain("lean toward lighter ops");
-			expect(authorCalls.map((c) => c.slug)).toEqual(["linus"]);
-		});
-	});
-});
+// Regenerate flow lives entirely inside the overlay component now and is
+// tested in assembly/tui/component.test.ts. The prior integration test that
+// exercised it via select-driven /assembly is removed.
 
 describe("runAssembleCommand — default-slug override", () => {
 	test("respects a contextual team_name when the model deviates from the default slug", async () => {
@@ -561,7 +709,12 @@ describe("runAssembleCommand — default-slug override", () => {
 			});
 			const { spawn } = makeSpawnReturning([contextual]);
 			const { ctx } = makeCtx(cwd, {
-				selectChoices: ["Approve and author"],
+				editorResults: [
+					approveResult({
+						team_slug: "strike-team",
+						team_name: "Strike Team",
+					}),
+				],
 			});
 			const { pi } = makePi();
 			const { authorMind } = makeAuthorMind();
@@ -592,7 +745,12 @@ describe("runAssembleCommand — default-slug override", () => {
 			});
 			const { spawn } = makeSpawnReturning([driftedSlug]);
 			const { ctx } = makeCtx(cwd, {
-				selectChoices: ["Approve and author"],
+				editorResults: [
+					approveResult({
+						team_slug: "assembly",
+						team_name: "Assembly",
+					}),
+				],
 			});
 			const { pi } = makePi();
 			const { authorMind } = makeAuthorMind();
@@ -618,99 +776,21 @@ describe("runAssembleCommand — default-slug override", () => {
 	});
 });
 
-describe("runAssembleCommand — metadata lock through regenerate", () => {
-	test("user-edited team_slug survives a regenerate", async () => {
-		await withTempProject(async (cwd) => {
-			fs.writeFileSync(path.join(cwd, "README.md"), "x");
-			const first = defaultProposal();
-			const second = defaultProposal({
-				team_slug: "model-picked",
-				team_name: "Model Picked",
-				members: [
-					{
-						name: "Ada",
-						slug: "ada",
-						role: "lead",
-						voice: "steady",
-						voiceDescription: "engineer",
-						rationale: "covers control",
-					},
-				],
-			});
-			const { spawn } = makeSpawnReturning([first, second]);
-			const { ctx } = makeCtx(cwd, {
-				selectChoices: [
-					"Edit team metadata",
-					"team slug",
-					"Regenerate",
-					"Approve and author",
-				],
-				inputs: ["custom-team", ""],
-			});
-			const { pi } = makePi();
-			const { authorMind } = makeAuthorMind();
-
-			await runAssembleCommand("describe", ctx, {
-				pi: pi as never,
-				spawnSubagent: spawn,
-				authorMind,
-			});
-
-			const roomPath = path.join(
-				cwd,
-				".pi",
-				"rooms",
-				"custom-team",
-				"room.json",
-			);
-			expect(fs.existsSync(roomPath)).toBe(true);
-			const room = JSON.parse(fs.readFileSync(roomPath, "utf-8"));
-			expect(room.slug).toBe("custom-team");
-			expect(room.participants).toEqual(["ada"]);
-		});
-	});
-
-	test("locked metadata suppresses default-slug override on regenerate", async () => {
-		await withTempProject(async (cwd) => {
-			fs.writeFileSync(path.join(cwd, "README.md"), "x");
-			const first = defaultProposal();
-			const second = defaultProposal({
-				team_slug: "another",
-				team_name: "Another",
-			});
-			const { spawn, calls } = makeSpawnReturning([first, second]);
-			const { ctx } = makeCtx(cwd, {
-				selectChoices: [
-					"Edit team metadata",
-					"team name",
-					"Regenerate",
-					"Cancel",
-				],
-				inputs: ["My Custom Team", ""],
-			});
-			const { pi } = makePi();
-			const { authorMind } = makeAuthorMind();
-
-			await runAssembleCommand("describe", ctx, {
-				pi: pi as never,
-				spawnSubagent: spawn,
-				authorMind,
-			});
-
-			expect(calls).toHaveLength(2);
-			// Second prompt should NOT include the default-slug directive once metadata is locked.
-			expect(calls[1].prompt).not.toContain('Use "assembly" as the team_slug');
-		});
-	});
-});
+// The "metadata lock through regenerate" tests previously drove
+// /assembly's select-driven loop to edit team metadata, regenerate, and
+// approve. After P2 the regenerate flow lives inside the overlay
+// component, which carries its own LockedMetadata propagation tested in
+// assembly/tui/state.test.ts ("applyRegenerated re-applies locked
+// metadata"). The integration-level scenarios are no longer reachable
+// from runAssembleCommand and have been removed.
 
 describe("runAssembleCommand — partial failure", () => {
 	test("one member fails; room saved with succeeded slugs only", async () => {
 		await withTempProject(async (cwd) => {
 			fs.writeFileSync(path.join(cwd, "README.md"), "x");
 			const { spawn } = makeSpawnReturning([defaultProposal()]);
-			const { ctx, notifications } = makeCtx(cwd, {
-				selectChoices: ["Approve and author"],
+			const { ctx, widgetStates } = makeCtx(cwd, {
+				editorResults: [approveResult()],
 			});
 			const { pi, auditEntries } = makePi();
 			const { authorMind } = makeAuthorMind({
@@ -735,8 +815,15 @@ describe("runAssembleCommand — partial failure", () => {
 			expect(auditEntries[0].entry.succeeded).toEqual(["neil"]);
 			expect(auditEntries[0].entry.failed).toEqual(["chris"]);
 
-			const summary = notifications[notifications.length - 1].message;
-			expect(summary).toContain("chris: spawn timed out");
+			// final summary lands in the panel widget; the per-member error line
+			// shows up as one of the indented body lines.
+			const panelEmits = widgetStates.filter(
+				(w) => w.key === "assembly-panel" && w.content !== undefined,
+			);
+			const lastPanel = panelEmits[panelEmits.length - 1];
+			expect(
+				lastPanel.content?.some((l) => l.includes("chris: spawn timed out")),
+			).toBe(true);
 		});
 	});
 
@@ -745,7 +832,7 @@ describe("runAssembleCommand — partial failure", () => {
 			fs.writeFileSync(path.join(cwd, "README.md"), "x");
 			const { spawn } = makeSpawnReturning([defaultProposal()]);
 			const { ctx } = makeCtx(cwd, {
-				selectChoices: ["Approve and author"],
+				editorResults: [approveResult()],
 			});
 			const { pi, auditEntries } = makePi();
 			const { authorMind } = makeAuthorMind({
@@ -789,13 +876,42 @@ describe("runAssembleCommand — guard rails", () => {
 		});
 	});
 
-	test("refuses when there are no signals or description", async () => {
+	test("prompts for a description via the multi-line wizard and proceeds with the typed value", async () => {
 		await withTempProject(async (cwd) => {
 			const { spawn, calls: spawnCalls } = makeSpawnReturning([
 				defaultProposal(),
 			]);
+			const { ctx } = makeCtx(cwd, {
+				editorResults: [
+					"a CLI tool\nthat does X\nand Y",
+					approveResult(),
+				],
+			});
+			const { pi } = makePi();
+			const { authorMind, calls: authorCalls } = makeAuthorMind();
+
+			await runAssembleCommand("", ctx, {
+				pi: pi as never,
+				spawnSubagent: spawn,
+				authorMind,
+			});
+
+			// Multi-line description survives through to the proposer.
+			expect(spawnCalls).toHaveLength(1);
+			expect(spawnCalls[0].prompt).toContain("a CLI tool");
+			expect(spawnCalls[0].prompt).toContain("and Y");
+			expect(authorCalls.length).toBeGreaterThan(0);
+		});
+	});
+
+	test("cancels gracefully when the user dismisses the description wizard", async () => {
+		await withTempProject(async (cwd) => {
+			const { spawn, calls: spawnCalls } = makeSpawnReturning([
+				defaultProposal(),
+			]);
+			// editorResults: [undefined] simulates esc / cancel from the description editor.
 			const { ctx, notifications } = makeCtx(cwd, {
-				selectChoices: [],
+				editorResults: [undefined],
 			});
 			const { pi } = makePi();
 			const { authorMind, calls } = makeAuthorMind();
@@ -806,12 +922,38 @@ describe("runAssembleCommand — guard rails", () => {
 				authorMind,
 			});
 
-			// proposer never called
+			expect(spawnCalls).toHaveLength(0);
+			expect(calls).toHaveLength(0);
+			const last = notifications[notifications.length - 1];
+			expect(last.type).toBe("info");
+			expect(last.message).toContain("Assembly cancelled");
+		});
+	});
+
+	test("falls back to a hard error when neither overlay nor input are available", async () => {
+		await withTempProject(async (cwd) => {
+			const { spawn, calls: spawnCalls } = makeSpawnReturning([
+				defaultProposal(),
+			]);
+			// hasUI=true but strip both ui.input and ui.custom.
+			const { ctx, notifications } = makeCtx(cwd);
+			(ctx.ui as { input?: unknown }).input = undefined;
+			const { pi } = makePi();
+			const { authorMind, calls } = makeAuthorMind();
+
+			await runAssembleCommand("", ctx, {
+				pi: pi as never,
+				spawnSubagent: spawn,
+				authorMind,
+			});
+
 			expect(spawnCalls).toHaveLength(0);
 			expect(calls).toHaveLength(0);
 			const last = notifications[notifications.length - 1];
 			expect(last.type).toBe("error");
 			expect(last.message).toContain("No project description");
+			expect(last.message).toContain(cwd);
+			expect(last.message).toContain("/assembly");
 		});
 	});
 
@@ -821,7 +963,7 @@ describe("runAssembleCommand — guard rails", () => {
 			fs.writeFileSync(path.join(cwd, "README.md"), "x");
 			const { spawn } = makeSpawnReturning([defaultProposal()]);
 			const { ctx, notifications } = makeCtx(cwd, {
-				selectChoices: ["Approve and author"],
+				editorResults: [approveResult()],
 			});
 			const { pi } = makePi();
 			const { authorMind, calls } = makeAuthorMind();
@@ -836,6 +978,29 @@ describe("runAssembleCommand — guard rails", () => {
 			const last = notifications[notifications.length - 1];
 			expect(last.type).toBe("error");
 			expect(last.message).toContain("collides with an existing mind");
+		});
+	});
+
+	test("refuses when overlay is not available", async () => {
+		await withTempProject(async (cwd) => {
+			fs.writeFileSync(path.join(cwd, "README.md"), "x");
+			const { spawn } = makeSpawnReturning([defaultProposal()]);
+			// No editorResults passed → ctx.ui.custom is undefined.
+			const { ctx, notifications } = makeCtx(cwd);
+			const { pi } = makePi();
+			const { authorMind, calls } = makeAuthorMind();
+
+			await runAssembleCommand("describe", ctx, {
+				pi: pi as never,
+				spawnSubagent: spawn,
+				authorMind,
+			});
+
+			expect(calls).toHaveLength(0);
+			const overlayError = notifications.find((n) =>
+				n.message.includes("UI does not support overlays"),
+			);
+			expect(overlayError?.type).toBe("error");
 		});
 	});
 });

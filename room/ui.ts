@@ -37,8 +37,6 @@ export const MIND_PALETTE: ReadonlyArray<{ name: string; rgb: [number, number, n
 
 const MODERATOR_DECISION_RGB: [number, number, number] = [180, 160, 200];
 const ROUND_METRICS_RGB: [number, number, number] = [120, 100, 140];
-export const ROOM_NOTICE_INFO_RGB: [number, number, number] = [140, 160, 180];
-export const ROOM_NOTICE_WARNING_RGB: [number, number, number] = [220, 180, 100];
 
 const PARTICIPANT_DONE_RGB: [number, number, number] = [120, 145, 130];
 const PARTICIPANT_READY_RGB: [number, number, number] = [110, 110, 130];
@@ -137,19 +135,6 @@ export type RoundMetricsDetails = {
 		cost?: number;
 	};
 };
-
-export type RoomNoticeLevel = "info" | "warning";
-
-export function renderRoomNoticeLine(
-	text: string,
-	level: RoomNoticeLevel = "info",
-): string {
-	const color =
-		level === "warning" ? ROOM_NOTICE_WARNING_RGB : ROOM_NOTICE_INFO_RGB;
-	const dot = ansiFg(color, "·");
-	const body = ansiFg(color, ansiItalic(text || ""));
-	return `${dot} ${body}`;
-}
 
 export function djb2(input: string): number {
 	let hash = 5381;

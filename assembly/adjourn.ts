@@ -24,6 +24,7 @@ import {
 	type SavedRoomSummary,
 } from "../room/core.ts";
 import type { AssembleCommandContext } from "./core.ts";
+import { notify } from "../shared/notice.ts";
 
 export interface AdjournDeps {
 	pi: ExtensionAPI;
@@ -424,18 +425,6 @@ function renderAdjournSummary(
 // ---------------------------------------------------------------------------
 // UI helpers (mirror assembly/core.ts patterns)
 // ---------------------------------------------------------------------------
-
-function notify(
-	ctx: AssembleCommandContext,
-	message: string,
-	type: "info" | "warning" | "error" = "info",
-): void {
-	if (ctx.hasUI) {
-		ctx.ui.notify(message, type);
-		return;
-	}
-	if (type === "error") throw new Error(message);
-}
 
 function setStatus(ctx: AssembleCommandContext, value: string): void {
 	if (!ctx.hasUI) return;

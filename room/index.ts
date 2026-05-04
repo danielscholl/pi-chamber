@@ -26,10 +26,14 @@ import {
 	registerSessionCommands,
 	registerSessionTarget,
 } from "../shared/session-exit.ts";
+import {
+	createTransientNotice,
+	type NoticeLevel,
+	notify,
+} from "../shared/notice.ts";
 import { CHAIRMAN_SLUG } from "./prompts.ts";
 import {
 	ROOM_CUSTOM_TYPES,
-	type RoomNoticeLevel,
 	type RoomStateView,
 	formatDurationMs,
 	mindSpeechRenderer,
@@ -38,7 +42,6 @@ import {
 	type ParticipantStatus,
 	paletteIndexForSlug,
 	renderParticipantBarLines,
-	renderRoomNoticeLine,
 	roundMetricsRenderer,
 	userRoomMessageRenderer,
 } from "./ui.ts";
@@ -109,54 +112,16 @@ export default function (pi: ExtensionAPI) {
 			roundMetricsRenderer(message as never, options, theme),
 	);
 
-	let noticeTimer: ReturnType<typeof setTimeout> | undefined;
-
 	// Inline room notice for lifecycle events tied to the conversation flow
 	// (activation, close, halt, leave, director override, /next, /inject).
 	// Renders as a transient widget anchored above the editor (next to the
 	// participant bar) instead of a top-of-terminal toast. Auto-clears after
 	// NOTICE_TTL_MS so stale notices don't pile up. Headless callers fall back
-	// to console output via notify().
-	function emitRoomNotice(
-		ctx: Pick<RoomCommandContext, "hasUI" | "ui">,
-		text: string,
-		level: RoomNoticeLevel = "info",
-	): void {
-		if (!ctx.hasUI) {
-			notify(ctx, text, level);
-			return;
-		}
-		const setWidget = (
-			ctx.ui as {
-				setWidget?: (
-					key: string,
-					content: string[] | undefined,
-					options?: { placement?: "aboveEditor" | "belowEditor" },
-				) => void;
-			}
-		).setWidget;
-		if (!setWidget) {
-			notify(ctx, text, level);
-			return;
-		}
-		if (noticeTimer) {
-			clearTimeout(noticeTimer);
-			noticeTimer = undefined;
-		}
-		setWidget(NOTICE_WIDGET_KEY, [renderRoomNoticeLine(text, level)], {
-			placement: "aboveEditor",
-		});
-		noticeTimer = setTimeout(() => {
-			noticeTimer = undefined;
-			try {
-				setWidget(NOTICE_WIDGET_KEY, undefined);
-			} catch {
-				// ctx may be torn down by the time the timer fires
-			}
-		}, NOTICE_TTL_MS);
-		// Don't keep the process alive just to clear a notice.
-		(noticeTimer as { unref?: () => void }).unref?.();
-	}
+	// to console output via shared notify().
+	const emitRoomNotice = createTransientNotice({
+		widgetKey: NOTICE_WIDGET_KEY,
+		ttlMs: NOTICE_TTL_MS,
+	});
 
 	function persistState(entry: RoomState): void {
 		try {
@@ -1429,22 +1394,6 @@ function availableSuffix(cwd: string): string {
 	} catch {
 		return "";
 	}
-}
-
-function notify(
-	ctx: Pick<RoomCommandContext, "hasUI" | "ui">,
-	message: string,
-	type: "info" | "warning" | "error" = "info",
-): void {
-	if (ctx.hasUI) {
-		ctx.ui.notify(message, type);
-		return;
-	}
-	if (type === "error") {
-		console.error(message);
-		throw new Error(message);
-	}
-	console.log(message);
 }
 
 function errorMessage(error: unknown): string {
