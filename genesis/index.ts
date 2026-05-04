@@ -41,6 +41,12 @@ import {
 	GENESIS_STARTERS,
 	type GenesisStarter,
 } from "./starters.ts";
+import {
+	type AssembleCommandContext,
+	type AuthorMindFields,
+	type AuthorMindOnceResult,
+	runAssembleCommand,
+} from "./assemble.ts";
 import { listGenesisMinds } from "../mind/core.ts";
 import {
 	loadObservatoryConfig,
@@ -244,6 +250,30 @@ export default function (
 			if (!fields) return;
 
 			await startGenesisAuthoringRequest(fields, config, ctx);
+		},
+	});
+
+	pi.registerCommand("genesis:assemble", {
+		description:
+			"Propose and author a team of Genesis minds based on the project (open-floor room + status lens).",
+		handler: async (args, ctx) => {
+			pruneExpiredRequests();
+			await runAssembleCommand(
+				args ?? "",
+				ctx as unknown as AssembleCommandContext,
+				{
+					pi,
+					spawnSubagent,
+					authorMind: (fields, config, cwd) =>
+						authorMindOnce(fields, config, cwd, spawnSubagent, (stream, entry) => {
+							try {
+								pi.appendEntry(stream, entry);
+							} catch {
+								/* audit is best-effort */
+							}
+						}),
+				},
+			);
 		},
 	});
 
@@ -897,6 +927,178 @@ function startGenesisProgress(
 function relativeToCwd(cwd: string, targetPath: string): string {
 	const relative = path.relative(cwd, targetPath) || ".";
 	return normalizePathSeparators(relative);
+}
+
+// ---------------------------------------------------------------------------
+// authorMindOnce — module-level single-mind authoring used by /genesis:assemble.
+//
+// Mirrors the spawn → parse → write → audit pipeline of
+// startGenesisAuthoringRequest but returns a structured result instead of
+// driving UI directly. Used by assemble's batch authoring; the existing
+// /genesis flow continues to use startGenesisAuthoringRequest for its richer
+// progress-widget UX.
+// ---------------------------------------------------------------------------
+
+type AppendEntryFn = (
+	stream: string,
+	entry: Record<string, unknown>,
+) => void;
+
+export async function authorMindOnce(
+	fields: AuthorMindFields,
+	config: GenesisConfig,
+	cwd: string,
+	spawnSubagent: SpawnGenesisFn,
+	appendEntry: AppendEntryFn,
+): Promise<AuthorMindOnceResult> {
+	const startedAt = Date.now();
+	const fail = (slug: string, error: string): AuthorMindOnceResult => ({
+		ok: false,
+		slug,
+		error,
+		durationMs: Date.now() - startedAt,
+	});
+
+	const name = fields.name.trim();
+	const role = fields.role.trim() || config.defaultRole;
+	const voice = fields.voice.trim() || config.defaultVoice;
+	const voiceDescription = fields.voiceDescription.trim();
+	const slug = fields.slug?.trim() || slugify(name);
+	if (!slug) {
+		return fail("", "name must contain at least one ASCII letter or number");
+	}
+
+	let paths;
+	try {
+		paths = resolveGenesisPaths(cwd, slug, config);
+		assertGenesisPathsInsideProject(paths);
+	} catch (error) {
+		return fail(slug, `path configuration invalid: ${errorMessage(error)}`);
+	}
+
+	if (existsSync(paths.mindPath)) {
+		return fail(
+			slug,
+			`mind directory already exists: ${relativeToCwd(paths.cwd, paths.mindPath)}`,
+		);
+	}
+	if (existsSync(paths.shimPath)) {
+		return fail(
+			slug,
+			`shim already exists: ${relativeToCwd(paths.cwd, paths.shimPath)}`,
+		);
+	}
+
+	try {
+		createMindStructure(paths);
+		seedSharedDoctrine(paths);
+	} catch (error) {
+		return fail(slug, `scaffold failed: ${errorMessage(error)}`);
+	}
+
+	if (config.seedLensViews) {
+		try {
+			const observatoryConfig = loadObservatoryConfig(paths.cwd);
+			const lensesRoot = resolveLensesRoot(paths.cwd, observatoryConfig);
+			scaffoldNewspaper(lensesRoot, slug);
+		} catch {
+			/* non-fatal: operator can author the lens manually */
+		}
+	}
+
+	const requestId = randomUUID();
+	const prompt = buildGenesisSubagentAuthoringPrompt({
+		requestId,
+		name,
+		slug,
+		role,
+		voiceDescription,
+		paths,
+	});
+
+	let spawnResult: SpawnGenesisResult;
+	try {
+		spawnResult = await spawnSubagent({ slug, prompt, cwd: paths.cwd });
+	} catch (error) {
+		return fail(slug, `subagent spawn failed: ${errorMessage(error)}`);
+	}
+
+	if (spawnResult.aborted) {
+		return fail(slug, "subagent was aborted");
+	}
+	if (spawnResult.exitCode !== 0) {
+		const detail = spawnResult.stderr.trim()
+			? ` Stderr: ${spawnResult.stderr.trim().slice(0, 400)}`
+			: "";
+		return fail(slug, `subagent exit ${spawnResult.exitCode}.${detail}`);
+	}
+
+	let parsed: GenesisAuthoringContent;
+	try {
+		parsed = parseGenesisAuthoringJson(spawnResult.finalText);
+	} catch (error) {
+		return fail(slug, `subagent JSON parse failed: ${errorMessage(error)}`);
+	}
+
+	const description = collapseOneLine(parsed.description);
+	if (parsed.agentInstructions.startsWith("---")) {
+		return fail(
+			slug,
+			"agentInstructions must not start with YAML frontmatter",
+		);
+	}
+
+	const shim = buildAgentShim({
+		name,
+		slug,
+		description,
+		agentInstructions: parsed.agentInstructions,
+		paths,
+	});
+
+	try {
+		writeFileSync(paths.soulPath, ensureTrailingNewline(parsed.soul), "utf-8");
+		writeFileSync(
+			paths.mindIndexPath,
+			ensureTrailingNewline(parsed.mindIndex),
+			"utf-8",
+		);
+		writeFileSync(
+			paths.memoryPath,
+			ensureTrailingNewline(parsed.memory),
+			"utf-8",
+		);
+		writeFileSync(
+			paths.rulesPath,
+			ensureTrailingNewline(parsed.rules),
+			"utf-8",
+		);
+		writeFileSync(paths.logPath, ensureTrailingNewline(parsed.log), "utf-8");
+		writeFileSync(paths.shimPath, ensureTrailingNewline(shim), "utf-8");
+	} catch (error) {
+		return fail(slug, `write failed: ${errorMessage(error)}`);
+	}
+
+	const validation = validateMind(paths);
+	if (!validation.ok) {
+		return fail(slug, `validation failed: ${validation.errors.join("; ")}`);
+	}
+
+	appendEntry("genesis", {
+		slug,
+		...(fields.source ? { source: fields.source } : {}),
+		mindPath: relativeToCwd(paths.cwd, paths.mindPath),
+		shimPath: relativeToCwd(paths.cwd, paths.shimPath),
+		createdAt: new Date().toISOString(),
+	});
+
+	return {
+		ok: true,
+		slug,
+		mindPath: relativeToCwd(paths.cwd, paths.mindPath),
+		shimPath: relativeToCwd(paths.cwd, paths.shimPath),
+		durationMs: Date.now() - startedAt,
+	};
 }
 
 function normalizePathSeparators(value: string): string {

@@ -22,6 +22,10 @@ import {
 	resolveDataFilePath,
 	resolveLensesRoot,
 	scaffoldNewspaper,
+	scaffoldTeamStatusBoard,
+	teamLensManifest,
+	teamLensName,
+	teamLensSlug,
 	validateSourceFilename,
 	validateLensId,
 	validateLensManifest,
@@ -600,5 +604,79 @@ describe("lensesActivitySummary", () => {
 		} finally {
 			fs.rmSync(tmp, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("scaffoldTeamStatusBoard", () => {
+	test("derives lens slug as <teamSlug>-team", () => {
+		expect(teamLensSlug("alpha")).toBe("alpha-team");
+		expect(teamLensName("alpha")).toBe("Alpha Team");
+		expect(teamLensName("lens-team")).toBe("Lens Team Team");
+	});
+
+	test("manifest is a status-board with users icon and bare data.json source", () => {
+		const manifest = teamLensManifest("alpha");
+		expect(manifest.kind).toBe("status-board");
+		expect(manifest.source).toBe("data.json");
+		expect(manifest.icon).toBe("users");
+		expect(manifest.name).toBe("Alpha Team");
+		expect(manifest.description).toContain("alpha");
+	});
+
+	test("creates lens.json and data.json on first run", () => {
+		withTempProject((cwd) => {
+			const lensesRoot = makeLensesRoot(cwd);
+			const result = scaffoldTeamStatusBoard(lensesRoot, "alpha", [
+				{ slug: "neil", role: "lead" },
+				{ slug: "chris", role: "executor" },
+			]);
+			expect(result.created).toBe(true);
+			expect(result.lensSlug).toBe("alpha-team");
+			expect(fs.existsSync(result.manifestPath)).toBe(true);
+			expect(fs.existsSync(result.dataPath)).toBe(true);
+
+			const manifest = JSON.parse(fs.readFileSync(result.manifestPath, "utf-8"));
+			expect(manifest.kind).toBe("status-board");
+			expect(manifest.source).toBe("data.json");
+
+			const data = JSON.parse(fs.readFileSync(result.dataPath, "utf-8"));
+			expect(Array.isArray(data)).toBe(true);
+			expect(data).toHaveLength(2);
+			expect(data[0]).toEqual({ name: "neil", status: "ready", role: "lead" });
+		});
+	});
+
+	test("idempotent on second run", () => {
+		withTempProject((cwd) => {
+			const lensesRoot = makeLensesRoot(cwd);
+			scaffoldTeamStatusBoard(lensesRoot, "alpha", [
+				{ slug: "neil", role: "lead" },
+			]);
+			const second = scaffoldTeamStatusBoard(lensesRoot, "alpha", [
+				{ slug: "different", role: "writer" },
+			]);
+			expect(second.created).toBe(false);
+			expect(second.reason).toContain("already exists");
+			const data = JSON.parse(fs.readFileSync(second.dataPath, "utf-8"));
+			expect(data[0].name).toBe("neil"); // not overwritten
+		});
+	});
+
+	test("rejects invalid team slug", () => {
+		withTempProject((cwd) => {
+			const lensesRoot = makeLensesRoot(cwd);
+			expect(() =>
+				scaffoldTeamStatusBoard(lensesRoot, "Bad_Slug", []),
+			).toThrow(/lens id/);
+		});
+	});
+
+	test("rejects path-escaping team slug", () => {
+		withTempProject((cwd) => {
+			const lensesRoot = makeLensesRoot(cwd);
+			expect(() =>
+				scaffoldTeamStatusBoard(lensesRoot, "../escape", []),
+			).toThrow();
+		});
 	});
 });

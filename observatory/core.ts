@@ -523,3 +523,103 @@ function titleCase(slug: string): string {
 		)
 		.join(" ");
 }
+
+// ---------------------------------------------------------------------------
+// Team status-board scaffolding
+//
+// Used by /genesis:assemble to scaffold a status-board lens that summarizes
+// the assembled team. Sibling to scaffoldNewspaper; same idempotency contract:
+// if either lens.json or the data file already exists, returns
+// `created: false` without overwriting.
+// ---------------------------------------------------------------------------
+
+export interface ScaffoldTeamLensResult {
+	teamSlug: string;
+	lensSlug: string;
+	created: boolean;
+	reason?: string;
+	manifestPath: string;
+	dataPath: string;
+}
+
+export function teamLensSlug(teamSlug: string): string {
+	return `${teamSlug}-team`;
+}
+
+export function teamLensName(teamSlug: string): string {
+	return `${titleCase(teamSlug)} Team`;
+}
+
+export function teamLensManifest(teamSlug: string): {
+	name: string;
+	kind: LensKind;
+	source: string;
+	icon: string;
+	description: string;
+} {
+	return {
+		name: teamLensName(teamSlug),
+		kind: "status-board",
+		source: "data.json",
+		icon: "users",
+		description: `Team roster authored by /genesis:assemble for ${teamSlug}.`,
+	};
+}
+
+export function teamLensData(
+	members: ReadonlyArray<{ slug: string; role: string }>,
+): unknown {
+	return members.map((m) => ({
+		name: m.slug,
+		status: "ready",
+		role: m.role,
+	}));
+}
+
+export function scaffoldTeamStatusBoard(
+	lensesRoot: string,
+	teamSlug: string,
+	members: ReadonlyArray<{ slug: string; role: string }>,
+): ScaffoldTeamLensResult {
+	const lensSlug = teamLensSlug(teamSlug);
+	const idCheck = validateLensId(lensSlug);
+	if (!idCheck.ok) {
+		throw new Error(
+			`cannot scaffold team status board for "${teamSlug}": ${idCheck.reason}`,
+		);
+	}
+	const lensFolder = path.resolve(lensesRoot, lensSlug);
+	assertInsideProject(lensesRoot, lensFolder, "teamLensFolder");
+	const manifestPath = path.join(lensFolder, LENS_MANIFEST_FILE);
+	const dataPath = path.join(lensFolder, "data.json");
+
+	if (existsSync(manifestPath) || existsSync(dataPath)) {
+		return {
+			teamSlug,
+			lensSlug,
+			created: false,
+			reason: "team status board lens already exists",
+			manifestPath,
+			dataPath,
+		};
+	}
+
+	mkdirSync(lensFolder, { recursive: true });
+	writeFileSync(
+		manifestPath,
+		`${JSON.stringify(teamLensManifest(teamSlug), null, 2)}\n`,
+		"utf-8",
+	);
+	writeFileSync(
+		dataPath,
+		`${JSON.stringify(teamLensData(members), null, 2)}\n`,
+		"utf-8",
+	);
+	return {
+		teamSlug,
+		lensSlug,
+		created: true,
+		manifestPath,
+		dataPath,
+	};
+}

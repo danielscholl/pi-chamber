@@ -523,3 +523,112 @@ describe("Genesis command flow", () => {
 		});
 	});
 });
+
+describe("/genesis:assemble registration", () => {
+	test("registers a /genesis:assemble command", async () => {
+		await withTempProject(async (cwd) => {
+			const harness = createHarness();
+			expect(harness.commands.has("genesis:assemble")).toBe(true);
+			const cmd = harness.commands.get("genesis:assemble");
+			expect(cmd?.handler).toBeInstanceOf(Function);
+		});
+	});
+
+	test("genesis:assemble runs end-to-end and writes minds + room + lens + audit", async () => {
+		await withTempProject(async (cwd) => {
+			fs.writeFileSync(path.join(cwd, "README.md"), "# Project\n\nHello.\n");
+
+			// First spawn = proposer; subsequent = per-member authoring.
+			let spawnCount = 0;
+			const proposalPayload = {
+				project: "test",
+				team_slug: "alpha-team",
+				team_name: "Alpha",
+				universe: "Heat",
+				rationale: "fits",
+				members: [
+					{
+						name: "Neil",
+						slug: "neil",
+						role: "lead",
+						voice: "calm",
+						voiceDescription: "calm strategist",
+						rationale: "runs point",
+					},
+				],
+			};
+			const spawnSubagent: SpawnGenesisFn = async (opts) => {
+				spawnCount += 1;
+				if (opts.slug === "assemble-proposer") {
+					return {
+						exitCode: 0,
+						finalText: JSON.stringify(proposalPayload),
+						stderr: "",
+						aborted: false,
+						durationMs: 1,
+					} satisfies SpawnGenesisResult;
+				}
+				return {
+					exitCode: 0,
+					finalText: JSON.stringify(defaultAuthoringPayload(opts.slug)),
+					stderr: "",
+					aborted: false,
+					durationMs: 1,
+				} satisfies SpawnGenesisResult;
+			};
+
+			const harness = createHarness({ spawn: spawnSubagent });
+			const ctx = createContext(cwd) as TestContext & {
+				ui: TestContext["ui"] & {
+					setWidget?: (
+						k: string,
+						content: string[] | undefined,
+					) => void;
+				};
+			};
+			// Provide a select that approves immediately, plus setWidget noop
+			(ctx.ui as { select?: (p: string, o: string[]) => Promise<string | undefined> }).select =
+				async (_prompt, _options) => "Approve and author";
+			(ctx.ui as { setWidget?: (k: string, c?: string[]) => void }).setWidget =
+				(_k, _c) => {};
+
+			await harness.commands.get("genesis:assemble")?.handler("describe me", ctx);
+
+			// At least the proposer call + 1 authoring call
+			expect(spawnCount).toBeGreaterThanOrEqual(2);
+
+			// Mind authored
+			const neilPaths = resolveGenesisPaths(cwd, "neil");
+			expect(fs.existsSync(neilPaths.soulPath)).toBe(true);
+			expect(validateMind(neilPaths).ok).toBe(true);
+
+			// Room saved
+			expect(
+				fs.existsSync(
+					path.join(cwd, ".pi", "rooms", "alpha-team", "room.json"),
+				),
+			).toBe(true);
+
+			// Lens saved
+			expect(
+				fs.existsSync(
+					path.join(
+						cwd,
+						".pi",
+						"observatory",
+						"lenses",
+						"alpha-team-team",
+						"lens.json",
+					),
+				),
+			).toBe(true);
+
+			// Audit entries: one per authored mind ("genesis") + one assemble entry
+			const assembleAudit = harness.auditEntries.find(
+				(e) => e.stream === "genesis-assemble",
+			);
+			expect(assembleAudit).toBeDefined();
+			expect(assembleAudit?.entry.succeeded).toEqual(["neil"]);
+		});
+	});
+});
