@@ -4,8 +4,10 @@ import {
 	spawnGenesisAuthoring,
 	type SpawnGenesisFn,
 } from "../genesis/spawn.ts";
+import { runAdjournCommand } from "./adjourn.ts";
 import {
 	type AssembleCommandContext,
+	parseAssembleArgs,
 	runAssembleCommand,
 } from "./core.ts";
 
@@ -25,32 +27,46 @@ export default function (
 	const spawnSubagent: SpawnGenesisFn =
 		deps.spawnSubagent ?? spawnGenesisAuthoring;
 
+	const safeAppendEntry = (
+		stream: string,
+		entry: Record<string, unknown>,
+	) => {
+		try {
+			pi.appendEntry(stream, entry);
+		} catch {
+			/* audit is best-effort */
+		}
+	};
+
 	pi.registerCommand("assembly", {
 		description:
-			"Propose and author a team of Genesis minds for the current project (auto-saves an open-floor room and a status-board lens).",
+			"Convene a team of Genesis minds for the project (default), or `/assembly adjourn [slug]` to take one apart.",
 		handler: async (args, ctx) => {
-			await runAssembleCommand(
-				args ?? "",
-				ctx as unknown as AssembleCommandContext,
-				{
-					pi,
-					spawnSubagent,
-					authorMind: (fields, config, cwd) =>
-						authorMindOnce(
-							fields,
-							config,
-							cwd,
-							spawnSubagent,
-							(stream, entry) => {
-								try {
-									pi.appendEntry(stream, entry);
-								} catch {
-									/* audit is best-effort */
-								}
-							},
-						),
-				},
-			);
+			const raw = args ?? "";
+			const parsed = parseAssembleArgs(raw);
+			const cmdCtx = ctx as unknown as AssembleCommandContext;
+
+			if (parsed.mode === "adjourn") {
+				await runAdjournCommand(
+					{ adjournSlug: parsed.adjournSlug },
+					cmdCtx,
+					{ pi, appendEntry: safeAppendEntry },
+				);
+				return;
+			}
+
+			await runAssembleCommand(raw, cmdCtx, {
+				pi,
+				spawnSubagent,
+				authorMind: (fields, config, cwd) =>
+					authorMindOnce(
+						fields,
+						config,
+						cwd,
+						spawnSubagent,
+						safeAppendEntry,
+					),
+			});
 		},
 	});
 }

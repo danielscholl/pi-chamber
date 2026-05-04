@@ -3,7 +3,7 @@
 import { randomUUID } from "node:crypto";
 // biome-ignore lint/suspicious/noTsIgnore: Project runtime provides Node built-ins; this workspace does not install @types/node.
 // @ts-ignore
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
 // biome-ignore lint/suspicious/noTsIgnore: Project runtime provides Node built-ins; this workspace does not install @types/node.
 // @ts-ignore
 import path from "node:path";
@@ -44,6 +44,7 @@ import {
 import { listGenesisMinds } from "../mind/core.ts";
 import {
 	loadObservatoryConfig,
+	removeNewspaperLens,
 	resolveLensesRoot,
 	scaffoldNewspaper,
 } from "../observatory/core.ts";
@@ -1085,6 +1086,108 @@ export async function authorMindOnce(
 		slug,
 		mindPath: relativeToCwd(paths.cwd, paths.mindPath),
 		shimPath: relativeToCwd(paths.cwd, paths.shimPath),
+		durationMs: Date.now() - startedAt,
+	};
+}
+
+// ---------------------------------------------------------------------------
+// removeMindOnce — module-level inverse of authorMindOnce. Used by /assembly
+// adjourn to take down a mind cleanly: deletes the mind directory, the shim,
+// and the per-mind newspaper lens. Idempotent (missing files are no-ops).
+// Appends a single audit entry under the `genesis` stream with action: "remove".
+// ---------------------------------------------------------------------------
+
+export interface RemoveMindOnceResult {
+	ok: boolean;
+	slug: string;
+	removed: {
+		mind: boolean;
+		shim: boolean;
+		newspaper: boolean;
+	};
+	error?: string;
+	durationMs: number;
+}
+
+export interface RemoveMindOptions {
+	/** Reason for removal; recorded in the audit entry. */
+	source?: string;
+}
+
+export async function removeMindOnce(
+	slug: string,
+	cwd: string,
+	config: GenesisConfig,
+	appendEntry: AppendEntryFn,
+	options: RemoveMindOptions = {},
+): Promise<RemoveMindOnceResult> {
+	const startedAt = Date.now();
+	const fail = (error: string): RemoveMindOnceResult => ({
+		ok: false,
+		slug,
+		removed: { mind: false, shim: false, newspaper: false },
+		error,
+		durationMs: Date.now() - startedAt,
+	});
+
+	const trimmed = slug?.trim();
+	if (!trimmed) {
+		return fail("slug must contain at least one ASCII letter or number");
+	}
+
+	let paths;
+	try {
+		paths = resolveGenesisPaths(cwd, trimmed, config);
+		assertGenesisPathsInsideProject(paths);
+	} catch (error) {
+		return fail(`path configuration invalid: ${errorMessage(error)}`);
+	}
+
+	const removed = { mind: false, shim: false, newspaper: false };
+
+	try {
+		if (existsSync(paths.mindPath)) {
+			rmSync(paths.mindPath, { recursive: true, force: true });
+			removed.mind = true;
+		}
+	} catch (error) {
+		return fail(`failed to remove mind directory: ${errorMessage(error)}`);
+	}
+
+	try {
+		if (existsSync(paths.shimPath)) {
+			rmSync(paths.shimPath, { force: true });
+			removed.shim = true;
+		}
+	} catch (error) {
+		return fail(`failed to remove shim: ${errorMessage(error)}`);
+	}
+
+	try {
+		const observatoryConfig = loadObservatoryConfig(paths.cwd);
+		const lensesRoot = resolveLensesRoot(paths.cwd, observatoryConfig);
+		const lensResult = removeNewspaperLens(lensesRoot, trimmed);
+		removed.newspaper = lensResult.removed;
+	} catch {
+		/* non-fatal: lens removal is best-effort, like seeding */
+	}
+
+	try {
+		appendEntry("genesis", {
+			action: "remove",
+			slug: trimmed,
+			...(options.source ? { source: options.source } : {}),
+			removed,
+			removedAt: new Date().toISOString(),
+		});
+	} catch {
+		/* audit is best-effort */
+	}
+
+	return {
+		ok: true,
+		slug: trimmed,
+		removed,
 		durationMs: Date.now() - startedAt,
 	};
 }

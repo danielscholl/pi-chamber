@@ -96,7 +96,18 @@ Opens an in-terminal TUI overlay that discovers mind-authored lenses under `.pi/
 /assembly "I'm building a CLI for X"
 ```
 
-Reads a small set of repo signals (`README.md`, `AGENTS.md`, `CLAUDE.md`, the manifest, depth-1 directory listing), proposes a team of 3-5 minds in a child Pi process, and lets you approve, drop, edit, or regenerate before authoring. Each approved member is authored as a full Genesis mind (concurrency cap 3); the team auto-saves to `.pi/rooms/<team-slug>/room.json` (open-floor strategy) and a team status-board lens to `.pi/observatory/lenses/<team-slug>-team/`. Existing minds are preserved and surfaced to the proposer so duplicates are avoided.
+Reads a small set of repo signals (`README.md`, `AGENTS.md`, `CLAUDE.md`, the manifest, depth-1 directory listing), proposes a team of 3-5 minds in a child Pi process, and lets you approve, drop, edit (members or team metadata), or regenerate before authoring. Each approved member is authored as a full Genesis mind (concurrency cap 3); the team auto-saves to `.pi/rooms/<team-slug>/room.json` (open-floor strategy) and a team status-board lens to `.pi/observatory/lenses/<team-slug>-team/`. Existing minds are preserved and surfaced to the proposer so duplicates are avoided.
+
+For the common single-team case the team is named `Assembly` (slug `assembly`) automatically. Subsequent assemblies pick contextual names.
+
+### Adjourn an assembly
+
+```text
+/assembly adjourn          # only one team: adjourns it after confirmation
+/assembly adjourn <slug>   # specific team
+```
+
+Full teardown: removes the room, the team status-board lens, and each member's mind directory, runnable shim, and newspaper lens. Members that appear in another saved room are preserved with a note in the confirmation dialog. `/assembly adjourn` only operates on rooms it created; hand-rolled `/room` rooms must be removed via `/room delete`.
 
 ## Recommended `AGENTS.md` snippet
 

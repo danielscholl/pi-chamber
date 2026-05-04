@@ -425,6 +425,43 @@ describe("saved room CRUD", () => {
 			).toThrow(/v1 modes/);
 		});
 	});
+
+	test("round-trips assembledBy marker", () => {
+		withTempProject((cwd) => {
+			writeCompleteMind(cwd, "ariadne");
+			writeCompleteMind(cwd, "mycroft");
+			writeSavedRoom(
+				cwd,
+				makeRoom({ slug: "assembly-rt", name: "Assembly RT", assembledBy: "assembly" }),
+			);
+			const read = readSavedRoom(cwd, "assembly-rt");
+			expect(read.assembledBy).toBe("assembly");
+		});
+	});
+
+	test("silently drops malformed assembledBy values", () => {
+		withTempProject((cwd) => {
+			writeCompleteMind(cwd, "ariadne");
+			writeCompleteMind(cwd, "mycroft");
+			const roomDir = path.join(cwd, ".pi", "rooms", "broken-marker");
+			fs.mkdirSync(roomDir, { recursive: true });
+			const now = new Date().toISOString();
+			fs.writeFileSync(
+				path.join(roomDir, "room.json"),
+				JSON.stringify({
+					slug: "broken-marker",
+					name: "Broken Marker",
+					mode: "concurrent",
+					participants: ["ariadne", "mycroft"],
+					createdAt: now,
+					updatedAt: now,
+					assembledBy: "not-assembly",
+				}),
+			);
+			const read = readSavedRoom(cwd, "broken-marker");
+			expect(read.assembledBy).toBeUndefined();
+		});
+	});
 });
 
 describe("transcript IO", () => {

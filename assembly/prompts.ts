@@ -38,6 +38,13 @@ export interface AssembleProposalInput {
 	noUniverse?: boolean;
 	feedback?: string;
 	previousProposal?: AssembleProposal;
+	/**
+	 * Preferred team_slug when available. The orchestrator passes
+	 * `"assembly"` for the first convene of a workspace so the simple
+	 * single-team case skips contextual naming. Belt-and-suspenders override
+	 * happens after parsing.
+	 */
+	defaultTeamSlug?: string;
 }
 
 export function buildAssembleProposalPrompt(
@@ -49,6 +56,7 @@ export function buildAssembleProposalPrompt(
 	const existingMindsBlock = renderExistingMindsBlock(signals.existingMinds);
 	const sizeDirective = renderSizeDirective(input.sizeOverride);
 	const universeDirective = renderUniverseDirective(input);
+	const defaultSlugDirective = renderDefaultSlugDirective(input.defaultTeamSlug);
 	const regenerateBlock = renderRegenerateBlock(input);
 
 	return ensureTrailingNewline(`You are a casting coordinator for pi-chamber.
@@ -66,7 +74,7 @@ ${existingMindsBlock}
 
 Constraints:
 - ${sizeDirective}
-- ${universeDirective}
+- ${universeDirective}${defaultSlugDirective}
 - Slugs MUST be lowercase kebab-case, ${ASSEMBLE_MAX_SLUG_LEN} chars or fewer, unique within your proposal, and not in the existing-minds list above.
 - Roles should COMPLEMENT existing minds, not duplicate them. If existing minds already cover the obvious roles, pick complementary specialties.
 - The project description is the primary signal. Repo files are secondary clues; ignore signals that contradict the description.
@@ -286,6 +294,11 @@ function renderSizeDirective(sizeOverride?: number): string {
 		return `Propose exactly ${sizeOverride} member${sizeOverride === 1 ? "" : "s"}.`;
 	}
 	return "Propose 3 to 5 members. Fewer if the scope is tight.";
+}
+
+function renderDefaultSlugDirective(defaultTeamSlug: string | undefined): string {
+	if (!defaultTeamSlug) return "";
+	return `\n- Use "${defaultTeamSlug}" as the team_slug and a matching display name (title-cased equivalent) when this is the first team for the project; only pick a contextual slug if the project clearly demands one.`;
 }
 
 function renderUniverseDirective(input: AssembleProposalInput): string {

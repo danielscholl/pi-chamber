@@ -10,8 +10,12 @@ import os from "node:os";
 // biome-ignore lint/suspicious/noTsIgnore: Bun tests run with Node built-ins available.
 // @ts-ignore
 import path from "node:path";
-import genesisExtension from "./index.ts";
-import { resolveGenesisPaths, validateMind } from "./core.ts";
+import genesisExtension, { removeMindOnce } from "./index.ts";
+import {
+	DEFAULT_GENESIS_CONFIG,
+	resolveGenesisPaths,
+	validateMind,
+} from "./core.ts";
 import type {
 	SpawnGenesisFn,
 	SpawnGenesisOptions,
@@ -520,6 +524,113 @@ describe("Genesis command flow", () => {
 					),
 				}),
 			]);
+		});
+	});
+});
+
+describe("removeMindOnce", () => {
+	function writeMindFiles(cwd: string, slug: string) {
+		const paths = resolveGenesisPaths(cwd, slug);
+		fs.mkdirSync(paths.mindPath, { recursive: true });
+		for (const folder of paths.ideaFolders) fs.mkdirSync(folder, { recursive: true });
+		fs.mkdirSync(paths.workingMemoryPath, { recursive: true });
+		fs.mkdirSync(path.dirname(paths.shimPath), { recursive: true });
+		fs.writeFileSync(paths.soulPath, `# ${slug}\n\nbody\n`);
+		fs.writeFileSync(paths.mindIndexPath, "# Index\n");
+		fs.writeFileSync(paths.memoryPath, "# Memory\n");
+		fs.writeFileSync(paths.rulesPath, "# Rules\n");
+		fs.writeFileSync(paths.logPath, "# Log\n");
+		fs.writeFileSync(paths.shimPath, `---\nname: ${slug}\ndescription: "x"\n---\n\nbody\n`);
+		const lensFolder = path.join(
+			cwd,
+			".pi",
+			"observatory",
+			"lenses",
+			`${slug}-newspaper`,
+		);
+		fs.mkdirSync(lensFolder, { recursive: true });
+		fs.writeFileSync(
+			path.join(lensFolder, "lens.json"),
+			JSON.stringify({
+				name: "Test Newspaper",
+				kind: "briefing",
+				source: "data.json",
+			}),
+		);
+		fs.writeFileSync(path.join(lensFolder, "data.json"), "{}");
+	}
+
+	test("removes mind directory, shim, and newspaper lens", async () => {
+		await withTempProject(async (cwd) => {
+			writeMindFiles(cwd, "neil");
+			const audits: Array<{ stream: string; entry: Record<string, unknown> }> = [];
+
+			const result = await removeMindOnce(
+				"neil",
+				cwd,
+				DEFAULT_GENESIS_CONFIG,
+				(stream, entry) => audits.push({ stream, entry }),
+			);
+
+			expect(result.ok).toBe(true);
+			expect(result.removed).toEqual({ mind: true, shim: true, newspaper: true });
+			const paths = resolveGenesisPaths(cwd, "neil");
+			expect(fs.existsSync(paths.mindPath)).toBe(false);
+			expect(fs.existsSync(paths.shimPath)).toBe(false);
+			expect(
+				fs.existsSync(
+					path.join(cwd, ".pi", "observatory", "lenses", "neil-newspaper"),
+				),
+			).toBe(false);
+
+			expect(audits).toHaveLength(1);
+			expect(audits[0].stream).toBe("genesis");
+			expect(audits[0].entry).toEqual(
+				expect.objectContaining({
+					action: "remove",
+					slug: "neil",
+				}),
+			);
+		});
+	});
+
+	test("idempotent on second run (missing files are no-ops)", async () => {
+		await withTempProject(async (cwd) => {
+			writeMindFiles(cwd, "neil");
+			const audits: Array<{ stream: string; entry: Record<string, unknown> }> = [];
+			const append = (stream: string, entry: Record<string, unknown>) =>
+				audits.push({ stream, entry });
+
+			const first = await removeMindOnce("neil", cwd, DEFAULT_GENESIS_CONFIG, append);
+			expect(first.ok).toBe(true);
+			expect(first.removed.mind).toBe(true);
+
+			const second = await removeMindOnce("neil", cwd, DEFAULT_GENESIS_CONFIG, append);
+			expect(second.ok).toBe(true);
+			expect(second.removed).toEqual({ mind: false, shim: false, newspaper: false });
+		});
+	});
+
+	test("rejects empty slug", async () => {
+		await withTempProject(async (cwd) => {
+			const result = await removeMindOnce("", cwd, DEFAULT_GENESIS_CONFIG, () => {});
+			expect(result.ok).toBe(false);
+			expect(result.error).toMatch(/slug/);
+		});
+	});
+
+	test("records source field in audit when provided", async () => {
+		await withTempProject(async (cwd) => {
+			writeMindFiles(cwd, "chris");
+			const audits: Array<{ stream: string; entry: Record<string, unknown> }> = [];
+			await removeMindOnce(
+				"chris",
+				cwd,
+				DEFAULT_GENESIS_CONFIG,
+				(stream, entry) => audits.push({ stream, entry }),
+				{ source: "assembly-adjourn:test-team" },
+			);
+			expect(audits[0].entry.source).toBe("assembly-adjourn:test-team");
 		});
 	});
 });

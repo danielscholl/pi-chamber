@@ -50,6 +50,8 @@ export const ASSEMBLE_OPEN_FLOOR_DEFAULTS = {
 } as const;
 
 export interface AssembleArgs {
+	mode: "convene" | "adjourn";
+	adjournSlug?: string;
 	description?: string;
 	size?: number;
 	universe?: string;
@@ -272,6 +274,7 @@ export async function runAssembleCommand(
 
 export function parseAssembleArgs(raw: string): AssembleArgs {
 	const args: AssembleArgs = {
+		mode: "convene",
 		noUniverse: false,
 		scanOnly: false,
 	};
@@ -279,6 +282,18 @@ export function parseAssembleArgs(raw: string): AssembleArgs {
 	if (!trimmed) return args;
 
 	const tokens = tokenize(trimmed);
+
+	// Adjourn subcommand: first non-flag token is exactly "adjourn".
+	// Optional second positional becomes the team slug. Anything beyond is
+	// ignored (slugs are single tokens; we don't attempt to combine them).
+	if (tokens.length > 0 && tokens[0] === "adjourn") {
+		args.mode = "adjourn";
+		if (tokens[1] && !tokens[1].startsWith("--")) {
+			args.adjournSlug = tokens[1];
+		}
+		return args;
+	}
+
 	const remaining: string[] = [];
 	for (let i = 0; i < tokens.length; i++) {
 		const token = tokens[i];
@@ -365,6 +380,9 @@ function tokenize(input: string): string[] {
 // Proposal generation (subagent call)
 // ---------------------------------------------------------------------------
 
+export const ASSEMBLE_DEFAULT_TEAM_SLUG = "assembly";
+export const ASSEMBLE_DEFAULT_TEAM_NAME = "Assembly";
+
 async function proposeTeam(
 	signals: RepoSignals,
 	args: AssembleArgs,
@@ -373,6 +391,10 @@ async function proposeTeam(
 	cwd: string,
 	spawnSubagent: SpawnGenesisFn,
 ): Promise<AssembleProposal> {
+	const defaultTeamSlug = isDefaultTeamSlugAvailable(cwd)
+		? ASSEMBLE_DEFAULT_TEAM_SLUG
+		: undefined;
+
 	const input: AssembleProposalInput = {
 		signals,
 		sizeOverride: args.size,
@@ -380,6 +402,7 @@ async function proposeTeam(
 		noUniverse: args.noUniverse,
 		feedback,
 		previousProposal: previous,
+		defaultTeamSlug,
 	};
 	const prompt = buildAssembleProposalPrompt(input);
 	const result = await spawnSubagent({
@@ -398,7 +421,33 @@ async function proposeTeam(
 			`Team proposer exited with code ${result.exitCode}.${detail}`,
 		);
 	}
-	return parseAssembleProposalJson(result.finalText);
+	const proposal = parseAssembleProposalJson(result.finalText);
+
+	// Belt-and-suspenders: if the default slug was offered and is still
+	// available, override whatever the proposer picked. Keeps the simple
+	// single-team UX deterministic regardless of model variance.
+	if (defaultTeamSlug && proposal.team_slug !== defaultTeamSlug) {
+		if (isDefaultTeamSlugAvailable(cwd)) {
+			return {
+				...proposal,
+				team_slug: defaultTeamSlug,
+				team_name: ASSEMBLE_DEFAULT_TEAM_NAME,
+			};
+		}
+	}
+	return proposal;
+}
+
+function isDefaultTeamSlugAvailable(cwd: string): boolean {
+	try {
+		const { roomDir } = resolveSavedRoomPaths(
+			cwd,
+			ASSEMBLE_DEFAULT_TEAM_SLUG,
+		);
+		return !existsSync(roomDir);
+	} catch {
+		return false;
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -428,6 +477,7 @@ async function runConfirmationLoop(
 			"Approve and author",
 			"Drop a member",
 			"Edit a member",
+			"Edit team metadata",
 			"Regenerate",
 			"Cancel",
 		]);
@@ -541,6 +591,78 @@ async function runConfirmationLoop(
 			newMembers[idx] = updated;
 			current = { ...current, members: newMembers };
 			notify(ctx, `Updated ${fieldChoice}.`, "info");
+			continue;
+		}
+
+		if (choice === "Edit team metadata") {
+			const fieldChoice = await select.call(ctx.ui, "Edit which?", [
+				"team name",
+				"team slug",
+				"Cancel",
+			]);
+			if (!fieldChoice || fieldChoice === "Cancel") continue;
+			const input = ctx.ui.input;
+			if (!input) {
+				notify(ctx, "UI does not support input; cannot edit team metadata.", "error");
+				continue;
+			}
+			if (fieldChoice === "team name") {
+				const value = (
+					await input.call(ctx.ui, "New team name:", current.team_name)
+				)?.trim();
+				if (!value) {
+					notify(ctx, "No change made.", "info");
+					continue;
+				}
+				current = { ...current, team_name: value };
+				notify(ctx, "Updated team name.", "info");
+				continue;
+			}
+			// team slug
+			const value = (
+				await input.call(ctx.ui, "New team slug:", current.team_slug)
+			)?.trim();
+			if (!value) {
+				notify(ctx, "No change made.", "info");
+				continue;
+			}
+			const newSlug = slugify(value);
+			if (!newSlug) {
+				notify(
+					ctx,
+					"Slug must contain ASCII letters or numbers.",
+					"warning",
+				);
+				continue;
+			}
+			if (newSlug === current.team_slug) {
+				notify(ctx, "Slug unchanged.", "info");
+				continue;
+			}
+			try {
+				const { roomDir } = resolveSavedRoomPaths(ctx.cwd, newSlug);
+				if (existsSync(roomDir)) {
+					notify(
+						ctx,
+						`Slug "${newSlug}" already exists as a saved room.`,
+						"warning",
+					);
+					continue;
+				}
+			} catch (error) {
+				notify(ctx, errorMessage(error), "warning");
+				continue;
+			}
+			if (current.members.some((m) => m.slug === newSlug)) {
+				notify(
+					ctx,
+					`Slug "${newSlug}" collides with a proposed member slug.`,
+					"warning",
+				);
+				continue;
+			}
+			current = { ...current, team_slug: newSlug };
+			notify(ctx, "Updated team slug.", "info");
 			continue;
 		}
 
@@ -733,6 +855,7 @@ function saveTeamRoom(
 		openFloor: { ...ASSEMBLE_OPEN_FLOOR_DEFAULTS },
 		opener: "chairman",
 		synthesizer: "chairman",
+		assembledBy: "assembly",
 	};
 	return writeSavedRoom(cwd, room);
 }

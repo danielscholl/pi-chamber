@@ -111,6 +111,13 @@ export type SavedRoom = {
 	 * neutral moderator; any other value must be a participant slug.
 	 */
 	opener?: "chairman" | string;
+	/**
+	 * Provenance marker. When set to `"assembly"`, this room was created by
+	 * `/assembly` and is eligible for `/assembly adjourn` (full teardown
+	 * including member minds). Hand-rolled `/room` rooms omit this field and
+	 * must be removed via `/room delete` instead.
+	 */
+	assembledBy?: "assembly";
 };
 
 export type SavedRoomSummary = {
@@ -724,6 +731,10 @@ function coerceOpener(value: unknown): string | undefined {
 	return SLUG_PATTERN.test(trimmed) ? trimmed : undefined;
 }
 
+function coerceAssembledBy(value: unknown): "assembly" | undefined {
+	return value === "assembly" ? "assembly" : undefined;
+}
+
 function applySavedRoomOptionals(
 	target: SavedRoom,
 	source: Partial<SavedRoom> | Record<string, unknown>,
@@ -748,6 +759,10 @@ function applySavedRoomOptionals(
 	if (openFloor) target.openFloor = openFloor;
 	const opener = coerceOpener((source as Record<string, unknown>).opener);
 	if (opener) target.opener = opener;
+	const assembledBy = coerceAssembledBy(
+		(source as Record<string, unknown>).assembledBy,
+	);
+	if (assembledBy) target.assembledBy = assembledBy;
 	return target;
 }
 

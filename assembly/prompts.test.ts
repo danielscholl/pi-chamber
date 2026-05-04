@@ -66,6 +66,22 @@ describe("buildAssembleProposalPrompt", () => {
 		);
 	});
 
+	test("defaultTeamSlug emits a 'use this slug' constraint line", () => {
+		const prompt = buildAssembleProposalPrompt({
+			signals: makeSignals(),
+			defaultTeamSlug: "assembly",
+		});
+		expect(prompt).toContain('Use "assembly" as the team_slug');
+	});
+
+	test("absent defaultTeamSlug emits no constraint line", () => {
+		const prompt = buildAssembleProposalPrompt({
+			signals: makeSignals(),
+		});
+		expect(prompt).not.toContain('Use "assembly" as the team_slug');
+		expect(prompt).not.toContain("as the team_slug if it makes sense");
+	});
+
 	test("--no-universe instructs literal naming", () => {
 		const prompt = buildAssembleProposalPrompt({
 			signals: makeSignals(),

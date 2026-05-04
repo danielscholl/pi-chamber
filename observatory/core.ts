@@ -6,6 +6,7 @@ import {
 	mkdirSync,
 	readdirSync,
 	readFileSync,
+	rmSync,
 	statSync,
 	writeFileSync,
 } from "node:fs";
@@ -622,4 +623,57 @@ export function scaffoldTeamStatusBoard(
 		manifestPath,
 		dataPath,
 	};
+}
+
+// ---------------------------------------------------------------------------
+// Lens removal — inverses for /assembly adjourn
+//
+// Both helpers are idempotent (no-op if the lens folder does not exist) and
+// validate the slug + path containment to match the scaffolding contracts.
+// ---------------------------------------------------------------------------
+
+export interface RemoveLensResult {
+	lensSlug: string;
+	removed: boolean;
+	folder: string;
+}
+
+export function removeNewspaperLens(
+	lensesRoot: string,
+	mindSlug: string,
+): RemoveLensResult {
+	const lensSlug = newspaperLensSlug(mindSlug);
+	const idCheck = validateLensId(lensSlug);
+	if (!idCheck.ok) {
+		throw new Error(
+			`cannot remove newspaper lens for "${mindSlug}": ${idCheck.reason}`,
+		);
+	}
+	const folder = path.resolve(lensesRoot, lensSlug);
+	assertInsideProject(lensesRoot, folder, "newspaperLensFolder");
+	if (!existsSync(folder)) {
+		return { lensSlug, removed: false, folder };
+	}
+	rmSync(folder, { recursive: true, force: true });
+	return { lensSlug, removed: true, folder };
+}
+
+export function removeTeamStatusBoard(
+	lensesRoot: string,
+	teamSlug: string,
+): RemoveLensResult {
+	const lensSlug = teamLensSlug(teamSlug);
+	const idCheck = validateLensId(lensSlug);
+	if (!idCheck.ok) {
+		throw new Error(
+			`cannot remove team status board for "${teamSlug}": ${idCheck.reason}`,
+		);
+	}
+	const folder = path.resolve(lensesRoot, lensSlug);
+	assertInsideProject(lensesRoot, folder, "teamLensFolder");
+	if (!existsSync(folder)) {
+		return { lensSlug, removed: false, folder };
+	}
+	rmSync(folder, { recursive: true, force: true });
+	return { lensSlug, removed: true, folder };
 }

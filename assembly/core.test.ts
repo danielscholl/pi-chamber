@@ -58,8 +58,8 @@ function writeMind(cwd: string, slug: string) {
 function defaultProposal(overrides: Record<string, unknown> = {}): Record<string, unknown> {
 	return {
 		project: "A test project",
-		team_slug: "test-team",
-		team_name: "Test Team",
+		team_slug: "assembly",
+		team_name: "Assembly",
 		universe: "Heat",
 		rationale: "covers the gaps",
 		members: [
@@ -218,11 +218,36 @@ function makeAuthorMind(
 }
 
 describe("parseAssembleArgs", () => {
-	test("returns empty defaults for empty input", () => {
+	test("returns convene defaults for empty input", () => {
 		expect(parseAssembleArgs("")).toEqual({
+			mode: "convene",
 			noUniverse: false,
 			scanOnly: false,
 		});
+	});
+
+	test("recognizes 'adjourn' as a subcommand", () => {
+		expect(parseAssembleArgs("adjourn")).toEqual({
+			mode: "adjourn",
+			noUniverse: false,
+			scanOnly: false,
+		});
+	});
+
+	test("captures adjourn slug from second positional", () => {
+		expect(parseAssembleArgs("adjourn alpha-team")).toEqual({
+			mode: "adjourn",
+			adjournSlug: "alpha-team",
+			noUniverse: false,
+			scanOnly: false,
+		});
+	});
+
+	test("ignores trailing tokens after adjourn slug", () => {
+		const args = parseAssembleArgs("adjourn alpha-team please");
+		expect(args.mode).toBe("adjourn");
+		expect(args.adjournSlug).toBe("alpha-team");
+		expect(args.description).toBeUndefined();
 	});
 
 	test("treats positional text as description", () => {
@@ -295,11 +320,11 @@ describe("validateProposalForAuthoring", () => {
 
 	test("rejects when team_slug already has a saved room", () => {
 		withTempProject((cwd) => {
-			fs.mkdirSync(path.join(cwd, ".pi", "rooms", "test-team"), {
+			fs.mkdirSync(path.join(cwd, ".pi", "rooms", "assembly"), {
 				recursive: true,
 			});
 			fs.writeFileSync(
-				path.join(cwd, ".pi", "rooms", "test-team", "room.json"),
+				path.join(cwd, ".pi", "rooms", "assembly", "room.json"),
 				"{}",
 			);
 			const proposal = JSON.parse(JSON.stringify(defaultProposal()));
@@ -338,14 +363,14 @@ describe("runAssembleCommand — happy path", () => {
 			expect(calls).toHaveLength(1);
 			expect(calls[0].slug).toBe("assemble-proposer");
 			expect(authorCalls.map((c) => c.slug)).toEqual(["neil", "chris"]);
-			expect(authorCalls[0].source).toBe("assemble:test-team");
+			expect(authorCalls[0].source).toBe("assemble:assembly");
 
 			// room saved
 			const roomConfig = path.join(
 				cwd,
 				".pi",
 				"rooms",
-				"test-team",
+				"assembly",
 				"room.json",
 			);
 			expect(fs.existsSync(roomConfig)).toBe(true);
@@ -362,7 +387,7 @@ describe("runAssembleCommand — happy path", () => {
 				".pi",
 				"observatory",
 				"lenses",
-				"test-team-team",
+				"assembly-team",
 				"lens.json",
 			);
 			expect(fs.existsSync(lensManifest)).toBe(true);
@@ -377,7 +402,7 @@ describe("runAssembleCommand — happy path", () => {
 			// final summary contains NEXT block
 			const summary = notifications[notifications.length - 1].message;
 			expect(summary).toContain("TEAM ASSEMBLED");
-			expect(summary).toContain("/room test-team");
+			expect(summary).toContain("/room assembly");
 		});
 	});
 });
@@ -400,7 +425,7 @@ describe("runAssembleCommand — cancellation", () => {
 			expect(calls).toHaveLength(0);
 			expect(auditEntries).toHaveLength(0);
 			expect(
-				fs.existsSync(path.join(cwd, ".pi", "rooms", "test-team")),
+				fs.existsSync(path.join(cwd, ".pi", "rooms", "assembly")),
 			).toBe(false);
 		});
 	});
@@ -430,7 +455,7 @@ describe("runAssembleCommand — drop a member", () => {
 			expect(calls.map((c) => c.slug)).toEqual(["neil"]);
 			const room = JSON.parse(
 				fs.readFileSync(
-					path.join(cwd, ".pi", "rooms", "test-team", "room.json"),
+					path.join(cwd, ".pi", "rooms", "assembly", "room.json"),
 					"utf-8",
 				),
 			);
@@ -533,7 +558,7 @@ describe("runAssembleCommand — partial failure", () => {
 
 			const room = JSON.parse(
 				fs.readFileSync(
-					path.join(cwd, ".pi", "rooms", "test-team", "room.json"),
+					path.join(cwd, ".pi", "rooms", "assembly", "room.json"),
 					"utf-8",
 				),
 			);
@@ -566,7 +591,7 @@ describe("runAssembleCommand — partial failure", () => {
 			});
 
 			expect(
-				fs.existsSync(path.join(cwd, ".pi", "rooms", "test-team")),
+				fs.existsSync(path.join(cwd, ".pi", "rooms", "assembly")),
 			).toBe(false);
 			expect(auditEntries).toHaveLength(1);
 			expect(auditEntries[0].entry.succeeded).toEqual([]);

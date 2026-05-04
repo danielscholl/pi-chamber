@@ -19,6 +19,8 @@ import {
 	newspaperLensName,
 	newspaperLensSlug,
 	readLensData,
+	removeNewspaperLens,
+	removeTeamStatusBoard,
 	resolveDataFilePath,
 	resolveLensesRoot,
 	scaffoldNewspaper,
@@ -677,6 +679,64 @@ describe("scaffoldTeamStatusBoard", () => {
 			expect(() =>
 				scaffoldTeamStatusBoard(lensesRoot, "../escape", []),
 			).toThrow();
+		});
+	});
+});
+
+describe("removeNewspaperLens", () => {
+	test("removes the newspaper folder when present", () => {
+		withTempProject((cwd) => {
+			const lensesRoot = makeLensesRoot(cwd);
+			scaffoldNewspaper(lensesRoot, "neil");
+			const result = removeNewspaperLens(lensesRoot, "neil");
+			expect(result.removed).toBe(true);
+			expect(result.lensSlug).toBe("neil-newspaper");
+			expect(fs.existsSync(path.join(lensesRoot, "neil-newspaper"))).toBe(false);
+		});
+	});
+
+	test("idempotent: removed=false when folder missing", () => {
+		withTempProject((cwd) => {
+			const lensesRoot = makeLensesRoot(cwd);
+			const result = removeNewspaperLens(lensesRoot, "ghost");
+			expect(result.removed).toBe(false);
+		});
+	});
+
+	test("rejects bad mind slug", () => {
+		withTempProject((cwd) => {
+			const lensesRoot = makeLensesRoot(cwd);
+			expect(() => removeNewspaperLens(lensesRoot, "Bad_Slug")).toThrow(/lens id/);
+		});
+	});
+});
+
+describe("removeTeamStatusBoard", () => {
+	test("removes the team folder when present", () => {
+		withTempProject((cwd) => {
+			const lensesRoot = makeLensesRoot(cwd);
+			scaffoldTeamStatusBoard(lensesRoot, "alpha", [
+				{ slug: "neil", role: "lead" },
+			]);
+			const result = removeTeamStatusBoard(lensesRoot, "alpha");
+			expect(result.removed).toBe(true);
+			expect(result.lensSlug).toBe("alpha-team");
+			expect(fs.existsSync(path.join(lensesRoot, "alpha-team"))).toBe(false);
+		});
+	});
+
+	test("idempotent: removed=false when folder missing", () => {
+		withTempProject((cwd) => {
+			const lensesRoot = makeLensesRoot(cwd);
+			const result = removeTeamStatusBoard(lensesRoot, "ghost-team");
+			expect(result.removed).toBe(false);
+		});
+	});
+
+	test("rejects path-escaping team slug", () => {
+		withTempProject((cwd) => {
+			const lensesRoot = makeLensesRoot(cwd);
+			expect(() => removeTeamStatusBoard(lensesRoot, "../escape")).toThrow();
 		});
 	});
 });

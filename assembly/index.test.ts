@@ -164,13 +164,75 @@ describe("/assembly command registration", () => {
 		});
 	});
 
+	test("dispatches /assembly adjourn through the same command", async () => {
+		await withTempProject(async (cwd) => {
+			// Seed an assembly-marked room with one mind so adjourn has something
+			// to remove.
+			const minds = ["neil"];
+			for (const slug of minds) {
+				const paths = resolveGenesisPaths(cwd, slug);
+				fs.mkdirSync(paths.mindPath, { recursive: true });
+				for (const folder of paths.ideaFolders)
+					fs.mkdirSync(folder, { recursive: true });
+				fs.mkdirSync(paths.workingMemoryPath, { recursive: true });
+				fs.mkdirSync(path.dirname(paths.shimPath), { recursive: true });
+				fs.writeFileSync(paths.soulPath, `# ${slug}\n\nbody\n`);
+				fs.writeFileSync(paths.mindIndexPath, "# Index\n\n- SOUL.md\n");
+				fs.writeFileSync(paths.memoryPath, "# Memory\n");
+				fs.writeFileSync(paths.rulesPath, "# Rules\n");
+				fs.writeFileSync(paths.logPath, "# Log\n");
+				fs.writeFileSync(
+					paths.shimPath,
+					`---\nname: ${slug}\ndescription: "x"\n---\n\nbody\n`,
+				);
+			}
+			const now = new Date().toISOString();
+			const roomDir = path.join(cwd, ".pi", "rooms", "assembly");
+			fs.mkdirSync(roomDir, { recursive: true });
+			fs.writeFileSync(
+				path.join(roomDir, "room.json"),
+				JSON.stringify({
+					slug: "assembly",
+					name: "Assembly",
+					mode: "open-floor",
+					participants: minds,
+					createdAt: now,
+					updatedAt: now,
+					assembledBy: "assembly",
+				}),
+			);
+
+			const harness = createHarness(async () => ({
+				exitCode: 0,
+				finalText: "{}",
+				stderr: "",
+				aborted: false,
+				durationMs: 1,
+			}));
+			const ctx = createContext(cwd);
+			(ctx.ui as { select?: (p: string, o: string[]) => Promise<string | undefined> })
+				.select = async () => "Adjourn";
+
+			await harness.commands.get("assembly")?.handler("adjourn", ctx);
+
+			expect(fs.existsSync(roomDir)).toBe(false);
+			expect(
+				fs.existsSync(path.join(cwd, ".pi", "minds", "neil")),
+			).toBe(false);
+			const adjournAudit = harness.auditEntries.find(
+				(e) => e.stream === "genesis-assemble",
+			);
+			expect(adjournAudit?.entry.action).toBe("adjourn");
+		});
+	});
+
 	test("/assembly runs end-to-end and writes minds + room + lens + audit", async () => {
 		await withTempProject(async (cwd) => {
 			fs.writeFileSync(path.join(cwd, "README.md"), "# Project\n\nHello.\n");
 
 			const proposalPayload = {
 				project: "test",
-				team_slug: "alpha-team",
+				team_slug: "assembly",
 				team_name: "Alpha",
 				universe: "Heat",
 				rationale: "fits",
@@ -218,7 +280,7 @@ describe("/assembly command registration", () => {
 
 			expect(
 				fs.existsSync(
-					path.join(cwd, ".pi", "rooms", "alpha-team", "room.json"),
+					path.join(cwd, ".pi", "rooms", "assembly", "room.json"),
 				),
 			).toBe(true);
 
@@ -229,7 +291,7 @@ describe("/assembly command registration", () => {
 						".pi",
 						"observatory",
 						"lenses",
-						"alpha-team-team",
+						"assembly-team",
 						"lens.json",
 					),
 				),
