@@ -41,12 +41,6 @@ import {
 	GENESIS_STARTERS,
 	type GenesisStarter,
 } from "./starters.ts";
-import {
-	type AssembleCommandContext,
-	type AuthorMindFields,
-	type AuthorMindOnceResult,
-	runAssembleCommand,
-} from "./assemble.ts";
 import { listGenesisMinds } from "../mind/core.ts";
 import {
 	loadObservatoryConfig,
@@ -250,30 +244,6 @@ export default function (
 			if (!fields) return;
 
 			await startGenesisAuthoringRequest(fields, config, ctx);
-		},
-	});
-
-	pi.registerCommand("genesis:assemble", {
-		description:
-			"Propose and author a team of Genesis minds based on the project (open-floor room + status lens).",
-		handler: async (args, ctx) => {
-			pruneExpiredRequests();
-			await runAssembleCommand(
-				args ?? "",
-				ctx as unknown as AssembleCommandContext,
-				{
-					pi,
-					spawnSubagent,
-					authorMind: (fields, config, cwd) =>
-						authorMindOnce(fields, config, cwd, spawnSubagent, (stream, entry) => {
-							try {
-								pi.appendEntry(stream, entry);
-							} catch {
-								/* audit is best-effort */
-							}
-						}),
-				},
-			);
 		},
 	});
 
@@ -930,14 +900,32 @@ function relativeToCwd(cwd: string, targetPath: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// authorMindOnce — module-level single-mind authoring used by /genesis:assemble.
+// authorMindOnce — module-level single-mind authoring used by /assembly (and
+// any future caller that needs end-to-end authoring as a callable primitive).
 //
 // Mirrors the spawn → parse → write → audit pipeline of
 // startGenesisAuthoringRequest but returns a structured result instead of
-// driving UI directly. Used by assemble's batch authoring; the existing
-// /genesis flow continues to use startGenesisAuthoringRequest for its richer
-// progress-widget UX.
+// driving UI directly. The existing /genesis flow continues to use
+// startGenesisAuthoringRequest for its richer progress-widget UX.
 // ---------------------------------------------------------------------------
+
+export interface AuthorMindFields {
+	name: string;
+	role: string;
+	voice: string;
+	voiceDescription: string;
+	slug?: string;
+	source?: string;
+}
+
+export interface AuthorMindOnceResult {
+	ok: boolean;
+	slug: string;
+	mindPath?: string;
+	shimPath?: string;
+	error?: string;
+	durationMs: number;
+}
 
 type AppendEntryFn = (
 	stream: string,

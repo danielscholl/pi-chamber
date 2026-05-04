@@ -9,7 +9,11 @@ import {
 	type GenesisConfig,
 	loadGenesisConfig,
 	slugify,
-} from "./core.ts";
+} from "../genesis/core.ts";
+import type {
+	AuthorMindFields,
+	AuthorMindOnceResult,
+} from "../genesis/index.ts";
 import {
 	type AssembleProposal,
 	type AssembleProposalInput,
@@ -21,7 +25,7 @@ import {
 	collectRepoSignals,
 	type RepoSignals,
 } from "./signals.ts";
-import type { SpawnGenesisFn } from "./spawn.ts";
+import type { SpawnGenesisFn } from "../genesis/spawn.ts";
 import { listGenesisMinds } from "../mind/core.ts";
 import {
 	loadObservatoryConfig,
@@ -68,24 +72,6 @@ export interface AssembleCommandContext {
 		): void;
 	};
 	waitForIdle?(): Promise<void>;
-}
-
-export interface AuthorMindFields {
-	name: string;
-	role: string;
-	voice: string;
-	voiceDescription: string;
-	slug?: string;
-	source?: string;
-}
-
-export interface AuthorMindOnceResult {
-	ok: boolean;
-	slug: string;
-	mindPath?: string;
-	shimPath?: string;
-	error?: string;
-	durationMs: number;
 }
 
 export type AuthorMindFn = (

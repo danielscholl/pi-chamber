@@ -29,6 +29,7 @@
     "mind/**",
     "room/**",
     "observatory/**",
+    "assembly/**",
     "shared/**",
     "dist/**",
     "README.md",
@@ -67,7 +68,8 @@
       "./genesis/index.ts",
       "./mind/index.ts",
       "./room/index.ts",
-      "./observatory/index.ts"
+      "./observatory/index.ts",
+      "./assembly/index.ts"
     ]
   }
 }

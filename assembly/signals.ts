@@ -9,7 +9,7 @@ import {
 	type GenesisConfig,
 	loadGenesisConfig,
 	resolveGenesisPaths,
-} from "./core.ts";
+} from "../genesis/core.ts";
 import { listGenesisMinds } from "../mind/core.ts";
 
 export const DEFAULT_PER_FILE_BYTES = 4096;

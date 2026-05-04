@@ -10,11 +10,11 @@ import os from "node:os";
 // biome-ignore lint/suspicious/noTsIgnore: Bun tests run with Node built-ins available.
 // @ts-ignore
 import path from "node:path";
-import { resolveGenesisPaths } from "./core.ts";
+import { resolveGenesisPaths } from "../genesis/core.ts";
 import { collectRepoSignals, DEFAULT_PER_FILE_BYTES } from "./signals.ts";
 
 function withTempProject<T>(fn: (cwd: string) => T): T {
-	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "genesis-signals-test-"));
+	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "assembly-signals-test-"));
 	try {
 		return fn(cwd);
 	} finally {

@@ -22,6 +22,7 @@
     "mind/**/*.ts",
     "room/**/*.ts",
     "observatory/**/*.ts",
+    "assembly/**/*.ts",
     "shared/**/*.ts"
   ],
   "exclude": ["node_modules", "dist", "**/*.test.ts"]

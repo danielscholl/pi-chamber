@@ -1,6 +1,6 @@
 # pi-chamber — Agent Instructions
 
-This repo is a **Pi extension package** that ships four composable features (genesis, mind, room, observatory). It is consumed by Pi workspaces either via `npm:pi-chamber` or via relative paths during local development.
+This repo is a **Pi extension package** that ships five composable features (genesis, mind, room, observatory, assembly). It is consumed by Pi workspaces either via `npm:pi-chamber` or via relative paths during local development.
 
 For user-facing context, read `README.md`. This file is the operational contract for coding agents working in this repo.
 
@@ -43,6 +43,11 @@ room/observatory.ts           # writes a status-board observatory lens mirroring
 observatory/index.ts         # /observatory runtime wiring + TUI overlay launch
 observatory/core.ts          # discovery, validation, path-containment helpers, lens data reader
 observatory/tui/             # TUI overlay component, render-* modules, input handling, watcher
+
+assembly/index.ts            # /assembly extension entry; wires deps from genesis primitives
+assembly/core.ts             # orchestration: arg parsing, propose, confirm loop, batch author, room/lens save, audit
+assembly/prompts.ts          # team proposal prompt builder + strict JSON parser
+assembly/signals.ts          # bounded repo signal collector (README, AGENTS, CLAUDE, manifest, dirs, existing minds)
 
 shared/session-exit.ts       # shared /exit command coordinator (mind + room)
 ```
@@ -135,6 +140,19 @@ Do not bypass Genesis authoring rules. Live `/genesis` requests run in a child P
 - The `/observatory` overlay is on-demand only. There is no `openOnStart` or `session_start` auto-mount.
 - The built-in Dashboard view is synthesized in-memory from discovered lenses, the optional `room` status-board lens, the Genesis mind list, and lens-root mtimes; it is not authored as a lens on disk. The repo still ships zero lenses.
 - Do not author default lenses in this repo; pi-chamber ships zero lenses. Tutorial walkthroughs may author them, but committed lenses belong with the consumer workspace, not the framework.
+
+## Assembly rules
+
+- `/assembly` orchestrates Genesis primitives; it must not duplicate the single-mind authoring pipeline. Use `authorMindOnce` exported from `genesis/index.ts` as the only authoring path. If new authoring behavior is needed, add it to genesis and reuse from assembly.
+- Live `/assembly` runs the proposal step in a child Pi process via `--no-extensions` (using `genesis/spawn.ts`); per-member authoring also runs in child Pi processes through `authorMindOnce`. The proposal returns strict JSON with no fallback parsers.
+- Repo signals are bounded: `README.md`, `AGENTS.md`, `CLAUDE.md`, the first detected manifest, and a depth-1 directory listing only. Per-file cap is 4 KB. Never recurse, never read `.env*`, never call the network. Failures are swallowed (best-effort snapshot).
+- Existing minds are surfaced to the proposer so it does not propose colliding slugs. Before authoring, the orchestrator re-validates against `listGenesisMinds` and rejects collisions defensively.
+- Output stays inside the consumer project: `.pi/minds/<slug>/`, `.pi/agents/<slug>.md`, `.pi/rooms/<team-slug>/room.json`, `.pi/observatory/lenses/<team-slug>-team/`. No registry, no commits.
+- Team rooms always save with `mode: "open-floor"`, `opener: "chairman"`, `synthesizer: "chairman"`, and the default `openFloor` tunables. `assembly/core.ts:ASSEMBLE_OPEN_FLOOR_DEFAULTS` is the single source of truth for these values.
+- Confirmation UX is mandatory: approve / drop / edit / regenerate (with optional feedback) / cancel. Non-UI callers are refused; do not add a `--yes` headless mode unless explicitly approved.
+- Batch authoring uses `mapWithConcurrencyLimit` from `room/spawn.ts` with a cap of 3. Partial failures preserve successful minds; the room is saved with the surviving slugs and the audit entry records both `succeeded` and `failed` arrays.
+- Keep deterministic logic split across pure modules with Bun tests: `assembly/signals.ts` (signal collection), `assembly/prompts.ts` (proposal prompt builder + parser), `assembly/core.ts` (orchestration helpers like `parseAssembleArgs` and `validateProposalForAuthoring`).
+- Audit entries are written under stream `genesis-assemble` (one per assembly run) plus stream `genesis` (one per authored mind). Do not double-audit.
 
 ## Coding conventions
 

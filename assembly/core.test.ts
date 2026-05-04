@@ -12,18 +12,20 @@ import os from "node:os";
 import path from "node:path";
 import {
 	type AssembleCommandContext,
-	type AuthorMindFields,
-	type AuthorMindOnceResult,
 	parseAssembleArgs,
 	runAssembleCommand,
 	validateProposalForAuthoring,
-} from "./assemble.ts";
-import { resolveGenesisPaths } from "./core.ts";
+} from "./core.ts";
+import { resolveGenesisPaths } from "../genesis/core.ts";
+import type {
+	AuthorMindFields,
+	AuthorMindOnceResult,
+} from "../genesis/index.ts";
 import type {
 	SpawnGenesisFn,
 	SpawnGenesisOptions,
 	SpawnGenesisResult,
-} from "./spawn.ts";
+} from "../genesis/spawn.ts";
 
 async function withTempProject<T>(
 	fn: (cwd: string) => Promise<T> | T,
