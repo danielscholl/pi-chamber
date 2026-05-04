@@ -408,6 +408,9 @@ export default function (pi: ExtensionAPI) {
 			case "clear":
 				clearRoom(ctx);
 				return;
+			case "close":
+				await runCloseSavedRoom(ctx, { slug: command.slug });
+				return;
 		}
 	}
 
@@ -718,11 +721,11 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		const NEW_ROOM = "+ New room";
-		const DELETE_ENTRY = "✕ Delete a saved room…";
+		const CLOSE_ENTRY = "✕ Close a saved room…";
 		const options = [
 			NEW_ROOM,
 			...saved.map(formatSavedRoomOption),
-			DELETE_ENTRY,
+			CLOSE_ENTRY,
 		];
 		const choice = await ctx.ui.select("Chamber rooms:", options);
 		if (!choice) return;
@@ -731,8 +734,8 @@ export default function (pi: ExtensionAPI) {
 			await runCreateRoomWizard(ctx, mindSlugs);
 			return;
 		}
-		if (choice === DELETE_ENTRY) {
-			await runDeleteSavedRoom(ctx, saved);
+		if (choice === CLOSE_ENTRY) {
+			await runCloseSavedRoom(ctx, { saved });
 			return;
 		}
 		const slug = parseSavedRoomChoice(choice, saved);
@@ -832,28 +835,71 @@ export default function (pi: ExtensionAPI) {
 		);
 	}
 
-	async function runDeleteSavedRoom(
+	// Shared by /room close <slug> AND the picker's "Close a saved room…"
+	// entry. Refuses on assembly-provenance rooms (those belong to /assembly
+	// adjourn). If the target is the currently-active room, leaves it first
+	// so we don't tear out the floor under live state.
+	async function runCloseSavedRoom(
 		ctx: RoomCommandContext,
-		saved: SavedRoomSummary[],
+		options: { slug?: string; saved?: SavedRoomSummary[] } = {},
 	): Promise<void> {
-		if (!ctx.hasUI || !ctx.ui.select) return;
-		const choice = await ctx.ui.select(
-			"Delete which saved room?",
-			saved.map(formatSavedRoomOption),
-		);
-		if (!choice) return;
-		const slug = parseSavedRoomChoice(choice, saved);
-		if (!slug) return;
+		const saved = options.saved ?? listSavedRooms(ctx.cwd);
+		if (saved.length === 0) {
+			notify(ctx, "No saved rooms to close.", "warning");
+			return;
+		}
+
+		let targetSlug = options.slug;
+		if (!targetSlug) {
+			if (!ctx.hasUI || !ctx.ui.select) {
+				notify(
+					ctx,
+					"UI does not support select; pass a slug: /room close <slug>",
+					"error",
+				);
+				return;
+			}
+			const choice = await ctx.ui.select(
+				"Close which saved room?",
+				saved.map(formatSavedRoomOption),
+			);
+			if (!choice) return;
+			const picked = parseSavedRoomChoice(choice, saved);
+			if (!picked) {
+				notify(ctx, "Could not resolve the selected room.", "warning");
+				return;
+			}
+			targetSlug = picked;
+		}
+
+		const summary = saved.find((r) => r.slug === targetSlug);
+		if (!summary) {
+			notify(
+				ctx,
+				`No saved room found for slug "${targetSlug}".`,
+				"error",
+			);
+			return;
+		}
+		if (summary.assembledBy === "assembly") {
+			notify(
+				ctx,
+				`Room "${targetSlug}" was created by /assembly. Use /assembly adjourn ${targetSlug} to remove it (and its member minds).`,
+				"error",
+			);
+			return;
+		}
+
 		try {
-			deleteSavedRoom(ctx.cwd, slug);
+			deleteSavedRoom(ctx.cwd, targetSlug);
 		} catch (error) {
 			notify(ctx, errorMessage(error), "error");
 			return;
 		}
-		if (activeRoom?.slug === slug) {
-			await leaveRoom(ctx, "saved room deleted");
+		if (activeRoom?.slug === targetSlug) {
+			await leaveRoom(ctx, "saved room closed");
 		}
-		notify(ctx, `Deleted saved room "${slug}".`, "info");
+		notify(ctx, `Closed saved room "${targetSlug}".`, "info");
 	}
 
 	async function activateRoom(
@@ -1217,6 +1263,12 @@ function roomArgumentCompletions(prefix: string): AutocompleteItem[] | null {
 				"Drop per-mind session files (forkPerMind rooms only). Optional <slug>.",
 		},
 		{
+			value: "close",
+			label: "close",
+			description:
+				"Close (delete) a saved room. Optional <slug>; refuses /assembly rooms.",
+		},
+		{
 			value: "help",
 			label: "help",
 			description: "Show /room usage",
@@ -1269,6 +1321,7 @@ function usageText(cwd: string): string {
 		"  /room status       show the active room",
 		"  /room list         list saved rooms",
 		"  /room reset [<slug>] drop per-mind sessions (forkPerMind rooms only)",
+		"  /room close [<slug>] close (delete) a saved room (use /assembly adjourn for assembly rooms)",
 		"  /room help         show this usage",
 		"  /halt              abort the in-flight round (any mode)",
 		"  /next <slug>       override the next-speaker pick (group-chat or open-floor)",

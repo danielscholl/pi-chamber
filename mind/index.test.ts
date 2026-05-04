@@ -273,7 +273,12 @@ describe("mind extension", () => {
 				process.chdir(cwd);
 				const harness = createHarness();
 				const command = harness.commands.get("mind");
-				expect(command?.getArgumentCompletions?.("")).toEqual(null);
+				// With no minds, autocomplete still surfaces `retire` so users
+				// can discover it (and get the friendly "no minds to retire"
+				// error). Anything else is filtered out.
+				expect(
+					command?.getArgumentCompletions?.("")?.map((i) => i.value),
+				).toEqual(["retire"]);
 
 				const ctx = createContext(cwd);
 				await command?.handler("", ctx);

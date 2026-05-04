@@ -15,8 +15,8 @@ A Pi extension package that bundles five composable features for the Pi coding a
 | Feature | Command | Purpose |
 |---|---|---|
 | **Genesis** | `/genesis`, `/genesis:<starter>` | Generate durable, project-local minds under `.pi/minds/<slug>/` plus runnable shims under `.pi/agents/<slug>.md`. Live authoring runs in a child Pi subagent. |
-| **Mind mode** | `/mind <slug>` | Activate a mind in the current session via system-prompt injection. Persona, durable memory, rules, log, and shared doctrine are appended each turn. No session swap. |
-| **Room** | `/room` (+ `/halt`, `/next`, `/inject`) | Multi-mind orchestration with `concurrent` / `sequential` / `group-chat` / `open-floor` strategies, director shortcuts, saved rooms, and live transcripts. |
+| **Mind mode** | `/mind <slug>`, `/mind retire [<slug>]` | Activate a mind in the current session via system-prompt injection. Persona, durable memory, rules, log, and shared doctrine are appended each turn. No session swap. `/mind retire` is the inverse of `/genesis` — full per-mind teardown. |
+| **Room** | `/room` (+ `/halt`, `/next`, `/inject`, `/room close [<slug>]`) | Multi-mind orchestration with `concurrent` / `sequential` / `group-chat` / `open-floor` strategies, director shortcuts, saved rooms, and live transcripts. `/room close` removes a saved room (assembly-provenance rooms route to `/assembly adjourn`). |
 | **Observatory** | `/observatory` | In-terminal TUI lens viewer that renders mind-authored briefing and status-board lenses, with a built-in Dashboard summary. Genesis seeds a starter newspaper lens for each new mind. |
 | **Assembly** | `/assembly [description]` | Propose a team of minds based on the current project (description plus a bounded repo scan), confirm interactively, batch-author the minds via Genesis, and auto-save an open-floor `/room` plus a team status-board lens. |
 
@@ -65,6 +65,15 @@ Use `/genesis:<starter>` to seed from a built-in starter (run `/genesis:help` fo
 
 Activates the mind in your current session. The mind's identity, memory, rules, and shared IDEA doctrine are injected on every turn — edits to `memory.md` or `rules.md` go live on the next turn. `/mind off` deactivates.
 
+### Retire a mind
+
+```text
+/mind retire           # picker over Genesis minds
+/mind retire <slug>    # named target
+```
+
+Full single-mind teardown after confirmation: removes `.pi/minds/<slug>/`, the `.pi/agents/<slug>.md` shim, and the `.pi/observatory/lenses/<slug>-newspaper/` lens. Refuses if the mind is currently active in this session (use `/leave` or `/detach` first) or if any saved room references it — the error message points at `/room close <room>` for hand-rolled rooms and `/assembly adjourn <team>` for assembly rooms.
+
 ### Run multiple minds together
 
 ```text
@@ -81,6 +90,8 @@ Pick a strategy and one or more minds:
 | `open-floor` | Speakers route the floor among themselves (peer-to-peer) |
 
 Director shortcuts: `/halt` to stop, `/next` to advance, `/inject` to drop a fresh prompt mid-turn. Rooms can be saved and replayed; transcripts persist under `.pi/rooms/`.
+
+Close a saved room with `/room close [<slug>]` (or via the bare `/room` picker's "Close a saved room…" entry). Assembly-provenance rooms are refused there — use `/assembly adjourn <team>` so member minds are torn down too.
 
 ### View lenses
 

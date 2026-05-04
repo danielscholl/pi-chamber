@@ -156,6 +156,26 @@ describe("parseRoomArgs", () => {
 			expect.objectContaining({ type: "error" }),
 		);
 	});
+
+	test("recognizes close with and without a slug", () => {
+		expect(parseRoomArgs("close")).toEqual({ type: "close" });
+		expect(parseRoomArgs("close design-review")).toEqual({
+			type: "close",
+			slug: "design-review",
+		});
+	});
+
+	test("rejects close with non-canonical slug or extra args", () => {
+		expect(parseRoomArgs("close Bad Slug")).toEqual(
+			expect.objectContaining({ type: "error" }),
+		);
+		expect(parseRoomArgs("close BAD")).toEqual(
+			expect.objectContaining({ type: "error" }),
+		);
+		expect(parseRoomArgs("close design-review extra")).toEqual(
+			expect.objectContaining({ type: "error" }),
+		);
+	});
 });
 
 describe("normalizeParticipantInput", () => {

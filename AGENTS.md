@@ -20,8 +20,9 @@ genesis/prompts.ts           # authoring prompt (legacy + subagent JSON variant)
 genesis/spawn.ts             # child-Pi spawn helper for /genesis subagent authoring
 genesis/starters.ts          # built-in starter metadata
 
-mind/index.ts           # /mind direct-chat runtime wiring
+mind/index.ts           # /mind direct-chat runtime wiring (+ /mind retire branch)
 mind/core.ts            # pure /mind helpers + validation
+mind/retire.ts          # /mind retire orchestration: safety checks + removeMindOnce
 
 room/index.ts                 # /room, /halt, /next, /inject runtime wiring
 room/core.ts                  # parsing, validation, state restore, saved-room/transcript IO
@@ -86,7 +87,8 @@ Do not bypass Genesis authoring rules. Live `/genesis` requests run in a child P
   - `/leave` (priority 20 mind target; priority 10 room target) stops persona injection and persists a `mind-state` deactivation entry. The conversation continues in the *same* session; the mind chat history bridges back into the parent transcript. No session swap.
   - `/detach` rewinds. At activation we capture the session leaf id; on `/detach` we fork at that id (`ctx.fork(preMindLeafId, { position: "at" })`) and switch into the fork. The original session, with the mind chat, is preserved as an artifact. The fork starts clean (no persona injection, no carried turns). If `ctx.fork` is unavailable or the captured leaf id is missing, `/detach` falls back to a `/leave`-style cleanup with a warning.
 - After `/leave` (not `/detach`), the next `before_agent_start` injects a one-shot "Mind Mode Off" guard naming the previously-active mind, then clears. Subsequent turns run with the unmodified base system prompt. `/detach` does not need this guard because the new (forked) session's transcript never adopted the mind's voice.
-- Slugs that exact-match a `/mind` subcommand keyword (`help`, `list`, `create`, `new`) are reserved by `normalizeMindSlug` so such names cannot become discoverable minds. `off` is intentionally not reserved.
+- Slugs that exact-match a `/mind` subcommand keyword (`help`, `list`, `create`, `new`, `retire`) are reserved by `normalizeMindSlug` so such names cannot become discoverable minds. `off` is intentionally not reserved.
+- `/mind retire [slug]` is the inverse of `/genesis`: full single-mind teardown via the genesis-side `removeMindOnce` primitive (`.pi/minds/<slug>/`, `.pi/agents/<slug>.md`, and the `.pi/observatory/lenses/<slug>-newspaper/` lens). Refuses when the slug is currently active in mind mode (the user must `/leave` or `/detach` first), and when any saved room references the slug (the error message points to `/room close <room-slug>` or `/assembly adjourn <team-slug>` depending on provenance). Audit lives on the existing `genesis` stream as `action: "remove"` with `source: "mind-retire"`. Keep deterministic logic in `mind/retire.ts`; do not duplicate `removeMindOnce`.
 
 ## Room rules
 
@@ -107,7 +109,8 @@ Do not bypass Genesis authoring rules. Live `/genesis` requests run in a child P
   - `@<slug> <message>` directly addresses one mind, bypassing the room strategy for that single turn.
 - Observatory mirroring is reload-based: `room/observatory.ts` writes a `status-board` lens at `.pi/observatory/lenses/room/` whenever room state changes. The directory is gitignored. The lens is removed on `/leave` or `/detach` and on session restore failures.
 - Saved rooms live at `.pi/rooms/<slug>/room.json` (durable config) and `.pi/rooms/<slug>/transcript.jsonl` (append-only history). Both are gitignored in the consumer project.
-- The bare `/room` invocation is a picker: select a saved room, create a new one, or delete one. Power-user subcommands (`on`, `mode`, `minds`, `clear`) still work but are not advertised in autocomplete.
+- The bare `/room` invocation is a picker: select a saved room, create a new one, or close one. Power-user subcommands (`on`, `mode`, `minds`, `clear`) still work but are not advertised in autocomplete. `close` is advertised in autocomplete and accepts an optional slug.
+- `/room close [slug]` is the named alias for the picker's "Close a saved room…" entry: deletes `.pi/rooms/<slug>/` (room.json + transcript + sessions). Refuses on rooms with `assembledBy === "assembly"` and points the user at `/assembly adjourn`. If the target is the currently-active room, `leaveRoom` is called first so live state is not torn out. The picker entry and the named subcommand share `runCloseSavedRoom`; keep them unified.
 - Saved rooms (`.pi/rooms/<slug>/room.json`) accept optional fields beyond the core schema:
   - `groupChat: { maxTurns?, minRounds?, maxSpeakerRepeats? }` overrides the per-turn group-chat caps.
   - `synthesizer: "<slug>"` replaces the default `chairman` moderator (group-chat) or sets the closing voice (open-floor).

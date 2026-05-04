@@ -6,6 +6,10 @@ import {
 	normalizeMindSlug,
 } from "./core.ts";
 import {
+	type MindRetireCommandContext,
+	runRetireCommand,
+} from "./retire.ts";
+import {
 	registerSessionCommands,
 	registerSessionTarget,
 } from "../shared/session-exit.ts";
@@ -279,6 +283,23 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
+			// /mind retire [slug] — single-mind teardown. Subcommand keyword is
+			// reserved in mind/core.ts so a mind cannot be named `retire`.
+			if (lower === "retire" || lower.startsWith("retire ")) {
+				const rest = value.slice("retire".length).trim();
+				const retireCtx =
+					commandCtx as unknown as MindRetireCommandContext;
+				await runRetireCommand(
+					rest ? { slug: rest } : {},
+					retireCtx,
+					{
+						appendEntry: (stream, entry) => pi.appendEntry(stream, entry),
+						isActiveMind: (slug) => activeMindSlug === slug,
+					},
+				);
+				return;
+			}
+
 			if (value) {
 				await activateMind(commandCtx, value);
 				return;
@@ -413,6 +434,11 @@ function mindArgumentCompletions(prefix: string): AutocompleteItem[] | null {
 		label: slug,
 		description: `Activate Genesis mind ${slug}`,
 	}));
+	items.push({
+		value: "retire",
+		label: "retire",
+		description: "Retire (delete) a Genesis mind",
+	});
 	const filtered = items.filter((item) =>
 		item.value.toLowerCase().startsWith(query),
 	);
@@ -420,7 +446,7 @@ function mindArgumentCompletions(prefix: string): AutocompleteItem[] | null {
 }
 
 function mindUsageText(): string {
-	return "Usage: /mind <slug>, /mind list, /mind create, or /mind help. Use /leave or /detach to end an active mind.";
+	return "Usage: /mind <slug>, /mind list, /mind create, /mind retire [<slug>], or /mind help. Use /leave or /detach to end an active mind.";
 }
 
 function createMindText(): string {

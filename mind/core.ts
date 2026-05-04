@@ -71,7 +71,13 @@ const LOG_TRUNCATION_MARKER =
 // them at normalization so such names never end up as discoverable minds.
 // `off` is intentionally not reserved: `/mind off` is documented as "not an
 // exit alias" and falls through to the standard "mind not ready" error path.
-const RESERVED_MIND_SLUGS = new Set(["help", "list", "create", "new"]);
+const RESERVED_MIND_SLUGS = new Set([
+	"help",
+	"list",
+	"create",
+	"new",
+	"retire",
+]);
 
 export function normalizeMindSlug(input: string): string {
 	const trimmed = input.trim();

@@ -14,6 +14,7 @@ import path from "node:path";
 // @ts-ignore
 import process from "node:process";
 import chamberRoomExtension from "./index.ts";
+import { writeSavedRoom } from "./core.ts";
 import { ROOM_CUSTOM_TYPES } from "./ui.ts";
 import { createMindStructure, resolveGenesisPaths } from "../genesis/core.ts";
 import { __resetForTests as resetSessionExit } from "../shared/session-exit.ts";
@@ -332,11 +333,14 @@ describe("room extension", () => {
 				const command = harness.commands.get("room");
 				expect(
 					command?.getArgumentCompletions?.("")?.map((i) => i.value),
-				).toEqual(["status", "list", "reset", "help"]);
+				).toEqual(["status", "list", "reset", "close", "help"]);
 				expect(command?.getArgumentCompletions?.("o")).toEqual(null);
 				expect(
 					command?.getArgumentCompletions?.("re")?.map((i) => i.value),
 				).toEqual(["reset"]);
+				expect(
+					command?.getArgumentCompletions?.("cl")?.map((i) => i.value),
+				).toEqual(["close"]);
 			} finally {
 				process.chdir(originalCwd);
 			}
@@ -1541,6 +1545,153 @@ describe("room extension", () => {
 			});
 			expect(ctx.notifications[0].message).toContain("Loaded 1 prior turn");
 			expect(ctx.notifications[0].message).toContain("/detach");
+		});
+	});
+
+	test("/room close <slug> deletes the saved room and notifies", async () => {
+		await withTempProject(async (cwd) => {
+			writeCompleteMind(cwd, "ariadne");
+			const now = new Date().toISOString();
+			writeSavedRoom(cwd, {
+				slug: "review",
+				name: "Review",
+				mode: "concurrent",
+				participants: ["ariadne"],
+				createdAt: now,
+				updatedAt: now,
+			});
+			const harness = createHarness();
+			const ctx = createContext(cwd);
+
+			await harness.commands.get("room")?.handler("close review", ctx);
+
+			expect(fs.existsSync(path.join(cwd, ".pi", "rooms", "review"))).toBe(
+				false,
+			);
+			const last = ctx.notifications[ctx.notifications.length - 1];
+			expect(last).toEqual(
+				expect.objectContaining({
+					type: "info",
+					message: expect.stringContaining('Closed saved room "review"'),
+				}),
+			);
+		});
+	});
+
+	test("/room close on a non-existent slug errors without touching anything", async () => {
+		await withTempProject(async (cwd) => {
+			writeCompleteMind(cwd, "ariadne");
+			const now = new Date().toISOString();
+			writeSavedRoom(cwd, {
+				slug: "review",
+				name: "Review",
+				mode: "concurrent",
+				participants: ["ariadne"],
+				createdAt: now,
+				updatedAt: now,
+			});
+			const harness = createHarness();
+			const ctx = createContext(cwd);
+
+			await harness.commands.get("room")?.handler("close ghost", ctx);
+
+			expect(fs.existsSync(path.join(cwd, ".pi", "rooms", "review"))).toBe(
+				true,
+			);
+			const last = ctx.notifications[ctx.notifications.length - 1];
+			expect(last.type).toBe("error");
+			expect(last.message).toContain('"ghost"');
+		});
+	});
+
+	test("/room close refuses an /assembly room and points at adjourn", async () => {
+		await withTempProject(async (cwd) => {
+			writeCompleteMind(cwd, "neil");
+			const now = new Date().toISOString();
+			writeSavedRoom(cwd, {
+				slug: "assembly",
+				name: "Assembly",
+				mode: "open-floor",
+				participants: ["neil"],
+				createdAt: now,
+				updatedAt: now,
+				assembledBy: "assembly",
+			});
+			const harness = createHarness();
+			const ctx = createContext(cwd);
+
+			await harness.commands.get("room")?.handler("close assembly", ctx);
+
+			expect(fs.existsSync(path.join(cwd, ".pi", "rooms", "assembly"))).toBe(
+				true,
+			);
+			const last = ctx.notifications[ctx.notifications.length - 1];
+			expect(last.type).toBe("error");
+			expect(last.message).toContain("/assembly adjourn assembly");
+		});
+	});
+
+	test("/room close warns when there are no saved rooms", async () => {
+		await withTempProject(async (cwd) => {
+			writeCompleteMind(cwd, "ariadne");
+			const harness = createHarness();
+			const ctx = createContext(cwd);
+
+			await harness.commands.get("room")?.handler("close", ctx);
+
+			const last = ctx.notifications[ctx.notifications.length - 1];
+			expect(last.type).toBe("warning");
+			expect(last.message).toContain("No saved rooms to close");
+		});
+	});
+
+	test("/room close <slug> rejects non-canonical slugs at parse", async () => {
+		await withTempProject(async (cwd) => {
+			const harness = createHarness();
+			const ctx = createContext(cwd);
+
+			await harness.commands.get("room")?.handler("close BAD", ctx);
+
+			const last = ctx.notifications[ctx.notifications.length - 1];
+			expect(last.type).toBe("error");
+			expect(last.message).toContain("canonical");
+		});
+	});
+
+	test("/room close <slug> coexists with an unrelated active room", async () => {
+		// Sanity: closing a saved room that is not the active one must not
+		// disturb the active state. The active-room branch (leaveRoom on slug
+		// match) is exercised indirectly via the picker entry's pre-existing
+		// coverage; this test just confirms /room close <slug> doesn't fire
+		// leaveRoom when the slug differs.
+		await withTempProject(async (cwd) => {
+			writeCompleteMind(cwd, "ariadne");
+			const harness = createHarness();
+			const ctx = createContext(cwd);
+
+			await harness.commands
+				.get("room")
+				?.handler("on concurrent ariadne", ctx);
+
+			const now = new Date().toISOString();
+			writeSavedRoom(cwd, {
+				slug: "elsewhere",
+				name: "Elsewhere",
+				mode: "concurrent",
+				participants: ["ariadne"],
+				createdAt: now,
+				updatedAt: now,
+			});
+
+			await harness.commands.get("room")?.handler("close elsewhere", ctx);
+
+			expect(
+				fs.existsSync(path.join(cwd, ".pi", "rooms", "elsewhere")),
+			).toBe(false);
+			const closed = ctx.notifications.find((n) =>
+				n.message.includes('Closed saved room "elsewhere"'),
+			);
+			expect(closed).toBeDefined();
 		});
 	});
 });

@@ -178,6 +178,7 @@ export type RoomCommand =
 	| { type: "mode"; mode: RoomMode }
 	| { type: "minds"; participants: string }
 	| { type: "reset"; slug?: string }
+	| { type: "close"; slug?: string }
 	| { type: "error"; message: string };
 
 export type RoomValidationResult = {
@@ -255,11 +256,23 @@ export function parseRoomArgs(args: string): RoomCommand {
 			}
 			return { type: "reset", slug };
 		}
+		case "close": {
+			if (rest.length === 0) return { type: "close" };
+			if (rest.length > 1) return tooManyArgs("close");
+			const slug = rest[0];
+			if (!SLUG_PATTERN.test(slug)) {
+				return {
+					type: "error",
+					message: `Room slug must be canonical: got "${slug}".`,
+				};
+			}
+			return { type: "close", slug };
+		}
 		default:
 			return {
 				type: "error",
 				message:
-					"Usage: /room [on|status|list|mode|minds|reset|clear]. Use /leave to leave an active room, or /detach to rewind and preserve it as an artifact. Supported v1 modes: concurrent, sequential, group-chat.",
+					"Usage: /room [on|status|list|mode|minds|reset|clear|close]. Use /leave to leave an active room, or /detach to rewind and preserve it as an artifact. Supported v1 modes: concurrent, sequential, group-chat.",
 			};
 	}
 }
