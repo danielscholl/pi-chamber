@@ -23,13 +23,22 @@ genesis/starters.ts          # built-in starter metadata
 mind/index.ts           # /mind direct-chat runtime wiring
 mind/core.ts            # pure /mind helpers + validation
 
-room/index.ts        # /room, /halt, /next, /inject runtime wiring
-room/core.ts         # parsing, validation, state restore, saved-room/transcript IO
-room/prompts.ts      # speaker / moderator / synthesis prompt builders
-room/spawn.ts        # child pi spawn helper, NDJSON parsing, concurrency limiter
-room/strategies.ts   # concurrent / sequential / group-chat orchestration
-room/ui.ts           # palette, message renderers, participant-bar factory
-room/observatory.ts  # writes a status-board observatory lens mirroring live room state
+room/index.ts                 # /room, /halt, /next, /inject runtime wiring
+room/core.ts                  # parsing, validation, state restore, saved-room/transcript IO
+room/prompts.ts               # speaker / moderator / synthesis / opener prompt builders + parsers
+room/spawn.ts                 # child pi spawn helper, NDJSON parsing, concurrency limiter
+room/turn-orchestration.ts    # per-turn glue: builds minds, context, persists, emits messages
+room/strategies/              # one file per orchestration strategy; index re-exports executeStrategy
+  index.ts                    # public surface: executeStrategy + re-exported types
+  types.ts                    # shared type contract (OrchestrationContext, StrategyInput, ...)
+  shared.ts                   # cross-strategy helpers (emptyResult)
+  concurrent.ts               # parallel takes
+  sequential.ts               # ordered refinement chain
+  group-chat.ts               # moderator routes the floor (+ optional speakerAddressing)
+  open-floor.ts               # speakers route the floor among themselves
+  _test-helpers.ts            # fixtures shared by the per-strategy test files
+room/ui.ts                    # palette, message renderers, participant-bar factory
+room/observatory.ts           # writes a status-board observatory lens mirroring live room state
 
 observatory/index.ts         # /observatory runtime wiring + TUI overlay launch
 observatory/core.ts          # discovery, validation, path-containment helpers, lens data reader
@@ -80,26 +89,35 @@ Do not bypass Genesis authoring rules. Live `/genesis` requests run in a child P
 - Do not add Chamber desktop dependencies, network calls, registries, lens coupling, or writes to `.pi/minds`.
 - Keep deterministic logic split across pure modules with Bun tests:
   - `room/core.ts` — parsing, validation, state restore, saved-room IO, transcript IO
-  - `room/prompts.ts` — speaker/moderator/synthesis prompt builders, JSON parsing, control-JSON stripping
+  - `room/prompts.ts` — speaker/moderator/synthesis/opener prompt builders, JSON parsing, control-JSON stripping
   - `room/spawn.ts` — child pi spawn helper, NDJSON parsing, concurrency limiter
-  - `room/strategies.ts` — concurrent / sequential / group-chat orchestration
+  - `room/turn-orchestration.ts` — per-turn glue between the host extension and `executeStrategy`
+  - `room/strategies/` — one file per mode (`concurrent.ts`, `sequential.ts`, `group-chat.ts`, `open-floor.ts`); `index.ts` exposes `executeStrategy` and the shared type contract from `types.ts`
   - `room/ui.ts` — palette, message renderers, participant-bar factory
 - The runtime extension `room/index.ts` owns: command registration, message-renderer registration, `on("input")` turn capture, `setWidget` participant bar, `setStatus` + `setWorkingIndicator` footer feedback, saved-room/transcript persistence, and observatory lens mirroring.
 - Director shortcuts available during an active room:
   - `/halt` aborts the in-flight orchestration (SIGTERM in-flight spawns; partial replies persist marked aborted).
-  - `/next <slug>` overrides the moderator's next-speaker pick for one turn (group-chat only).
-  - `/inject <text>` prepends a moderator-style note to the next speaker's prompt (group-chat only).
+  - `/next <slug>` overrides the next-speaker pick for one turn (group-chat or open-floor).
+  - `/inject <text>` prepends a director note to the next speaker's prompt (group-chat or open-floor; in open-floor it lands as the addressed `reason`).
   - `@<slug> <message>` directly addresses one mind, bypassing the room strategy for that single turn.
 - Observatory mirroring is reload-based: `room/observatory.ts` writes a `status-board` lens at `.pi/observatory/lenses/room/` whenever room state changes. The directory is gitignored. The lens is removed on `/leave` or `/detach` and on session restore failures.
 - Saved rooms live at `.pi/rooms/<slug>/room.json` (durable config) and `.pi/rooms/<slug>/transcript.jsonl` (append-only history). Both are gitignored in the consumer project.
 - The bare `/room` invocation is a picker: select a saved room, create a new one, or delete one. Power-user subcommands (`on`, `mode`, `minds`, `clear`) still work but are not advertised in autocomplete.
-- Saved rooms (`.pi/rooms/<slug>/room.json`) accept optional fields beyond the core schema: `groupChat: { maxTurns?, minRounds?, maxSpeakerRepeats? }` overrides the per-turn group-chat caps; `synthesizer: "<slug>"` replaces the default `chairman` moderator with a Genesis mind; `concurrentSynthesis: true | "chairman" | "<slug>"` enables an optional synthesis turn after concurrent rounds (default off); `forkPerMind: boolean` enables persistent per-mind sessions. Hand-edit `room.json` to set them; malformed values silently revert to defaults.
+- Saved rooms (`.pi/rooms/<slug>/room.json`) accept optional fields beyond the core schema:
+  - `groupChat: { maxTurns?, minRounds?, maxSpeakerRepeats? }` overrides the per-turn group-chat caps.
+  - `synthesizer: "<slug>"` replaces the default `chairman` moderator (group-chat) or sets the closing voice (open-floor).
+  - `concurrentSynthesis: true | "chairman" | "<slug>"` enables an optional synthesis turn after concurrent rounds (default off).
+  - `forkPerMind: boolean` enables persistent per-mind sessions.
+  - `speakerAddressing: boolean` (group-chat only) lets speakers emit a JSON tail suggesting the next speaker; the moderator is biased toward honoring it but still enforces repeat-cap and round-floor.
+  - `openFloor: { maxTurns?, minRounds?, maxSpeakerRepeats?, endVoteThreshold? }` (open-floor only) tunes the speaker-routed loop. `endVoteThreshold` is a fraction (0..1] of speakers that must vote `end` after `minRounds` is met before the room closes early; default 0.5.
+  - `opener: "chairman" | "<slug>"` (open-floor only) sets the optional opening voice; defaults to first participant when absent.
+  - Hand-edit `room.json` to set them; malformed values silently revert to defaults.
 - Per-mind config: optional `.pi/minds/<slug>/mind-config.json` carries `{ tools?: string[], model?: string, fallbackModels?: string[] }`. When present, `tools` becomes a child Pi `--tools` allowlist; `model` overrides the default model for that mind; `fallbackModels` are tried in order if the primary fails with a model-side error. Malformed individual fields silently coerce to undefined (room activation never blocks on misshapen config).
 - Forked per-mind sessions: when a saved room sets `forkPerMind: true`, each mind's child Pi runs with `--session .pi/rooms/<roomSlug>/sessions/<mindSlug>.session.jsonl` so the mind keeps its own conversational history across turns of the same room. Cost: session-file growth proportional to rooms × minds × turns. Use `/room reset [<slug>]` to drop them. The `sessions/` directory is gitignored along with the rest of `.pi/rooms/`.
 - When a room is active, all non-slash user input is captured by the extension and routed to the mind orchestrator. Use `/leave` to leave the room (round stays in the current session) or `/detach` to rewind and preserve the round as an artifact, before talking to the parent assistant again.
 - Room activation is in-place (no session swap, no TUI flicker), mirroring `/mind`. The leaf id captured at activation is stored on the room state as `preRoomLeafId`; `/detach` forks at that point. If the leaf id is missing or `ctx.fork` is unavailable, `/detach` falls back to `/leave` with a warning.
 - Treat live room state as session-local via `pi.appendEntry`; saved-room files own durable cross-session continuity. Durable mind memory remains owned by Genesis minds.
-- Supported v1 modes are only `concurrent`, `sequential`, and `group-chat`; handoff and magentic are future modes until explicitly approved.
+- Supported v1 modes are `concurrent`, `sequential`, `group-chat`, and `open-floor`; handoff and magentic are future modes until explicitly approved. Open-floor lets speakers route the floor among themselves via address tails (`{action: "address" | "pass" | "end"}`); the chairman participates only as an optional opener and/or synthesizer.
 - Per-mind colors come from `MIND_PALETTE` in `room/ui.ts` via `paletteIndexForSlug(slug)` (djb2 hash). Slot is stable across runs.
 
 ## Observatory rules

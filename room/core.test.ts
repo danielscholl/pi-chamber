@@ -791,6 +791,113 @@ describe("saved room optional fields", () => {
 			expect(safeReadSavedRoom(cwd, "broken")).toBeUndefined();
 		});
 	});
+
+	test("round-trips speakerAddressing, openFloor, and opener", () => {
+		withTempProject((cwd) => {
+			writeCompleteMind(cwd, "ariadne");
+			writeCompleteMind(cwd, "mycroft");
+			writeSavedRoom(
+				cwd,
+				makeRoom({
+					mode: "open-floor",
+					speakerAddressing: true,
+					openFloor: {
+						maxTurns: 10,
+						minRounds: 2,
+						maxSpeakerRepeats: 3,
+						endVoteThreshold: 0.66,
+					},
+					opener: "chairman",
+				}),
+			);
+			const read = readSavedRoom(cwd, "design-review");
+			expect(read.speakerAddressing).toBe(true);
+			expect(read.openFloor).toEqual({
+				maxTurns: 10,
+				minRounds: 2,
+				maxSpeakerRepeats: 3,
+				endVoteThreshold: 0.66,
+			});
+			expect(read.opener).toBe("chairman");
+		});
+	});
+
+	test("opener accepts a participant slug", () => {
+		withTempProject((cwd) => {
+			writeCompleteMind(cwd, "ariadne");
+			writeCompleteMind(cwd, "mycroft");
+			writeSavedRoom(
+				cwd,
+				makeRoom({
+					mode: "open-floor",
+					opener: "ariadne",
+				}),
+			);
+			const read = readSavedRoom(cwd, "design-review");
+			expect(read.opener).toBe("ariadne");
+		});
+	});
+
+	test("malformed openFloor and opener silently coerce to undefined", () => {
+		withTempProject((cwd) => {
+			writeCompleteMind(cwd, "ariadne");
+			writeCompleteMind(cwd, "mycroft");
+			const { roomDir, configPath } = resolveSavedRoomPaths(cwd, "design-review");
+			fs.mkdirSync(roomDir, { recursive: true });
+			const now = new Date().toISOString();
+			fs.writeFileSync(
+				configPath,
+				JSON.stringify({
+					slug: "design-review",
+					name: "Design Review",
+					mode: "concurrent",
+					participants: ["ariadne", "mycroft"],
+					createdAt: now,
+					updatedAt: now,
+					speakerAddressing: "yes",
+					openFloor: { maxTurns: -1, endVoteThreshold: 1.5 },
+					opener: "Bad Slug!",
+				}),
+				"utf-8",
+			);
+			const read = readSavedRoom(cwd, "design-review");
+			expect(read.speakerAddressing).toBeUndefined();
+			expect(read.openFloor).toBeUndefined();
+			expect(read.opener).toBeUndefined();
+		});
+	});
+
+	test("partially malformed openFloor keeps valid fields", () => {
+		withTempProject((cwd) => {
+			writeCompleteMind(cwd, "ariadne");
+			writeCompleteMind(cwd, "mycroft");
+			const { roomDir, configPath } = resolveSavedRoomPaths(cwd, "design-review");
+			fs.mkdirSync(roomDir, { recursive: true });
+			const now = new Date().toISOString();
+			fs.writeFileSync(
+				configPath,
+				JSON.stringify({
+					slug: "design-review",
+					name: "Design Review",
+					mode: "open-floor",
+					participants: ["ariadne", "mycroft"],
+					createdAt: now,
+					updatedAt: now,
+					openFloor: {
+						maxTurns: 8,
+						minRounds: "bad",
+						endVoteThreshold: 0.75,
+					},
+				}),
+				"utf-8",
+			);
+			const read = readSavedRoom(cwd, "design-review");
+			expect(read.openFloor).toEqual({
+				maxTurns: 8,
+				endVoteThreshold: 0.75,
+			});
+		});
+	});
 });
 
 describe("V2 transcript shape", () => {
@@ -1093,5 +1200,57 @@ describe("describeRoomState", () => {
 		// trailing ' repeat cap' text rather than hardcoding the default value.
 		expect(out).toMatch(/\d+ min round/);
 		expect(out).toMatch(/\d+ repeat cap/);
+	});
+
+	test("group-chat surfaces speakerAddressing flag when on", () => {
+		const out = describeRoomState(active("group-chat"), {
+			speakerAddressing: true,
+		});
+		expect(out).toContain("Speaker addressing: on.");
+	});
+
+	test("open-floor without overrides falls back to defaults", () => {
+		const out = describeRoomState(active("open-floor"));
+		expect(out).toContain("Room active: open-floor");
+		expect(out).toContain("Opener: first participant");
+		expect(out).toContain("min round");
+		expect(out).toContain("max turns");
+		expect(out).toContain("end-vote");
+	});
+
+	test("open-floor honors opener override", () => {
+		const out = describeRoomState(active("open-floor"), {
+			opener: "chairman",
+		});
+		expect(out).toContain("Opener: chairman (built-in)");
+	});
+
+	test("open-floor honors a participant slug as opener", () => {
+		const out = describeRoomState(active("open-floor"), {
+			opener: "ariadne",
+		});
+		expect(out).toContain("Opener: ariadne");
+	});
+
+	test("open-floor honors openFloor limit overrides", () => {
+		const out = describeRoomState(active("open-floor"), {
+			openFloor: {
+				maxTurns: 8,
+				minRounds: 2,
+				maxSpeakerRepeats: 3,
+				endVoteThreshold: 0.66,
+			},
+		});
+		expect(out).toContain("8 max turns");
+		expect(out).toContain("2 min round");
+		expect(out).toContain("3 repeat cap");
+		expect(out).toContain("66% end-vote");
+	});
+
+	test("open-floor surfaces synthesizer when set", () => {
+		const out = describeRoomState(active("open-floor"), {
+			synthesizer: "mycroft",
+		});
+		expect(out).toContain("Synthesizer: mycroft");
 	});
 });

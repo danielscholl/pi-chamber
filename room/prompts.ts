@@ -39,7 +39,25 @@ export const CONTROL_ACTIONS = new Set([
 	"done",
 	"direct",
 	"close",
+	"address",
+	"pass",
+	"end",
 ]);
+
+/**
+ * Speaker-driven routing actions used by group-chat (when speaker addressing is
+ * on) and open-floor mode. Speakers append a JSON tail with one of these
+ * actions to influence who speaks next; absent or malformed JSON is treated as
+ * "no opinion" and the strategy falls back to its default rotation.
+ */
+export const SPEAKER_ADDRESS_ACTIONS = ["address", "pass", "end"] as const;
+export type SpeakerAddressAction = (typeof SPEAKER_ADDRESS_ACTIONS)[number];
+
+export type SpeakerAddress = {
+	action: SpeakerAddressAction;
+	slug?: string;
+	reason?: string;
+};
 
 export type ChamberHistoryTurn = {
 	speaker: string;
@@ -55,6 +73,26 @@ export type BuildSpeakerPromptInput = {
 	userMessage: string;
 	history: ChamberHistoryTurn[];
 	moderatorDirection?: string;
+	/**
+	 * When true, append a trailer instructing the speaker that they MAY suggest
+	 * the next speaker (or call for the discussion to end) by emitting a JSON
+	 * tail. Used by group-chat with `speakerAddressing` and by open-floor.
+	 */
+	addressingEnabled?: boolean;
+	/**
+	 * When `addressingEnabled` is on, the explicit list of slugs the speaker
+	 * may address. Defaults to `participants` minus self. Group-chat passes a
+	 * speakers-only list (excluding any participant-slug moderator) so the
+	 * trailer never advertises a moderator the routing layer would discard.
+	 */
+	addressablePeers?: string[];
+	/**
+	 * When set, the speaker is being directly addressed by another mind. The
+	 * resulting prompt lifts this out of `<chatroom-history>` into a prominent
+	 * `<addressed-to-you>` block so the speaker engages with the addressee
+	 * first. Used by open-floor mode.
+	 */
+	addressedFrom?: { slug: string; reason?: string };
 };
 
 export type ModeratorPhase = "open" | "moderate" | "may_close";
@@ -66,6 +104,12 @@ export type BuildModeratorPromptInput = {
 	transcript: ChamberHistoryTurn[];
 	phase: ModeratorPhase;
 	spokenSlugs: Set<string>;
+	/**
+	 * When the prior speaker emitted an `address` suggestion, surface it to the
+	 * moderator so it can honor the speaker-driven nudge unless the suggested
+	 * speaker has hit the repeat cap. Only set in addressing-enabled rooms.
+	 */
+	speakerSuggestion?: { slug: string; reason?: string };
 };
 
 export type BuildSynthesisPromptInput = {
@@ -92,12 +136,66 @@ export function buildSpeakerPrompt(input: BuildSpeakerPromptInput): string {
 		? `<moderator-direction>${xmlEscape(input.moderatorDirection)}</moderator-direction>\nThe moderator has asked you to specifically address: ${xmlEscape(input.moderatorDirection)}\n`
 		: "";
 
+	const addressedXml = input.addressedFrom
+		? renderAddressedToYou(input.addressedFrom)
+		: "";
+
 	const message = `<message sender="You">${xmlEscape(input.userMessage)}</message>`;
 
-	const blocks = [identity, room, historyXml, directionXml, message].filter(
-		(b) => b && b.trim().length > 0,
-	);
+	const addressingTrailer = input.addressingEnabled
+		? renderAddressingTrailer(
+				input.addressablePeers ?? input.participants,
+				input.mindSlug,
+			)
+		: "";
+
+	const blocks = [
+		identity,
+		room,
+		historyXml,
+		directionXml,
+		addressedXml,
+		message,
+		addressingTrailer,
+	].filter((b) => b && b.trim().length > 0);
 	return blocks.join("\n\n");
+}
+
+function renderAddressedToYou(addressedFrom: {
+	slug: string;
+	reason?: string;
+}): string {
+	const reason = addressedFrom.reason
+		? ` reason="${xmlEscape(addressedFrom.reason)}"`
+		: "";
+	const reasonLine = addressedFrom.reason
+		? ` They asked you to specifically address: ${xmlEscape(addressedFrom.reason)}.`
+		: "";
+	return `<addressed-to-you sender="${xmlEscape(addressedFrom.slug)}"${reason}/>\nYou are being directly addressed by ${xmlEscape(addressedFrom.slug)}. Engage with their point first; the rest of the room will hear your reply.${reasonLine}`;
+}
+
+function renderAddressingTrailer(
+	participants: string[],
+	selfSlug: string,
+): string {
+	const others = participants.filter((p) => p !== selfSlug);
+	const peers = others.length > 0 ? others.join(", ") : "(no peers)";
+	return [
+		`<addressing-options>`,
+		`After your reply, you MAY end your message with EXACTLY ONE JSON object on its own line to influence what happens next. If you have no preference, omit it.`,
+		``,
+		`To suggest who speaks next:`,
+		`{ "action": "address", "slug": "<one of: ${peers}>", "reason": "<one short sentence>" }`,
+		``,
+		`To pass the floor without preference:`,
+		`{ "action": "pass", "reason": "<why>" }`,
+		``,
+		`To vote that the discussion should end:`,
+		`{ "action": "end", "reason": "<why>" }`,
+		``,
+		`Rules: only valid peer slugs are allowed; do not address yourself; do not include any prose after the JSON object.`,
+		`</addressing-options>`,
+	].join("\n");
 }
 
 function renderChatroomHistory(
@@ -142,6 +240,14 @@ export function buildModeratorPrompt(input: BuildModeratorPromptInput): string {
 	xml += `  <roles-spoken>${xmlEscape(spokenNames || "none")}</roles-spoken>\n`;
 	xml += `  <roles-remaining>${xmlEscape(remainingNames || `all: ${participantNames}`)}</roles-remaining>\n`;
 
+	if (input.speakerSuggestion) {
+		const reasonAttr = input.speakerSuggestion.reason
+			? ` reason="${xmlEscape(input.speakerSuggestion.reason)}"`
+			: "";
+		xml += `  <speaker-suggestion slug="${xmlEscape(input.speakerSuggestion.slug)}"${reasonAttr}/>\n`;
+		xml += `  <speaker-suggestion-note>The previous speaker suggested addressing ${xmlEscape(input.speakerSuggestion.slug)}. Honor this unless that speaker has already hit the repeat cap, in which case pick the least-spoken participant. Direction should reflect the suggested reason when sensible.</speaker-suggestion-note>\n`;
+	}
+
 	xml += `  <instruction>\n`;
 	xml += `    YOU ARE THE MODERATOR. Your ONLY job right now is to decide who speaks next.\n`;
 	xml += `    DO NOT answer the user's question yourself. DO NOT provide analysis.\n`;
@@ -167,6 +273,42 @@ export function buildModeratorPrompt(input: BuildModeratorPromptInput): string {
 	xml += `    Or to end: {"next_speaker": "", "direction": "summary of why closing", "action": "close"}\n`;
 	xml += `  </instruction>\n`;
 	xml += `</group-chat-moderation>`;
+	return xml;
+}
+
+export type BuildOpenFloorOpenerPromptInput = {
+	openerSlug: string;
+	participants: string[];
+	userMessage: string;
+	history: ChamberHistoryTurn[];
+};
+
+/**
+ * Build the open-floor opener prompt. The opener picks who speaks first and
+ * sets a one-sentence direction; it does NOT respond to the user. It uses the
+ * same JSON shape as `parseModeratorDecision` so the strategy can reuse the
+ * existing parser.
+ */
+export function buildOpenFloorOpenerPrompt(
+	input: BuildOpenFloorOpenerPromptInput,
+): string {
+	const participantNames = input.participants.join(", ");
+	let xml = `<open-floor-open participants="${xmlEscape(participantNames)}">\n`;
+	xml += `  <user-question>${xmlEscape(input.userMessage)}</user-question>\n`;
+	if (input.history.length > 0) {
+		xml += `  <prior-rounds>\n`;
+		for (const turn of input.history) {
+			xml += `    <turn speaker="${xmlEscape(turn.speaker)}">${xmlEscape(stripControlJson(turn.content))}</turn>\n`;
+		}
+		xml += `  </prior-rounds>\n`;
+	}
+	xml += `  <instruction>\n`;
+	xml += `    YOU ARE THE OPENER. Your ONLY job is to pick who speaks first and set a one-sentence direction.\n`;
+	xml += `    DO NOT answer the user's question yourself. DO NOT provide analysis. The participants will discuss freely after this.\n`;
+	xml += `    RESPOND WITH EXACTLY THIS JSON FORMAT AND NOTHING ELSE:\n`;
+	xml += `    {"next_speaker": "<exact participant slug>", "direction": "<one short sentence>", "action": "direct"}\n`;
+	xml += `  </instruction>\n`;
+	xml += `</open-floor-open>`;
 	return xml;
 }
 
@@ -238,6 +380,57 @@ export function extractJsonObject(text: string): string | null {
 	return null;
 }
 
+/**
+ * Extract the LAST balanced top-level JSON object from text.
+ *
+ * Speaker-side control JSON is appended to free-form prose (sometimes after
+ * a JSON code example earlier in the reply). Using the first-extraction
+ * helper for that path silently misses the real tail when a code example
+ * appears upstream. This helper walks the string left-to-right collecting
+ * every balanced top-level `{...}` span and returns the last one.
+ */
+export function extractTrailingJsonObject(text: string): string | null {
+	let last: string | null = null;
+	let i = 0;
+	while (i < text.length) {
+		const start = text.indexOf("{", i);
+		if (start === -1) break;
+		let depth = 0;
+		let inString = false;
+		let escape = false;
+		let end = -1;
+		for (let j = start; j < text.length; j++) {
+			const ch = text[j];
+			if (escape) {
+				escape = false;
+				continue;
+			}
+			if (ch === "\\" && inString) {
+				escape = true;
+				continue;
+			}
+			if (ch === '"') {
+				inString = !inString;
+				continue;
+			}
+			if (inString) continue;
+			if (ch === "{") depth++;
+			if (ch === "}") {
+				depth--;
+				if (depth === 0) {
+					end = j;
+					break;
+				}
+			}
+		}
+		// Bail on unbalanced input rather than infinite-looping.
+		if (end === -1) break;
+		last = text.substring(start, end + 1);
+		i = end + 1;
+	}
+	return last;
+}
+
 /** Parse a moderator decision response. Returns null on malformed input. */
 export function parseModeratorDecision(
 	text: string,
@@ -259,6 +452,47 @@ export function parseModeratorDecision(
 }
 
 /**
+ * Parse a speaker-emitted routing tail. Speakers in addressing-enabled rooms
+ * may end their message with a JSON object: `{"action": "address" | "pass" |
+ * "end", "slug"?: "...", "reason"?: "..."}`. Anything else returns null and
+ * the caller's strategy falls back to round-robin.
+ *
+ * Mirrors `parseModeratorDecision` deliberately so the parsing surface is
+ * uniform across speaker-side and moderator-side control JSON.
+ */
+export function parseSpeakerAddress(text: string): SpeakerAddress | null {
+	// Speaker control objects are appended to the end of free-form prose; the
+	// reply may also contain JSON code examples upstream. Always parse the
+	// trailing object so the real control JSON wins.
+	const json = extractTrailingJsonObject(text);
+	if (!json) return null;
+	try {
+		const parsed = JSON.parse(json) as Record<string, unknown>;
+		const rawAction = typeof parsed.action === "string" ? parsed.action : "";
+		if (!isSpeakerAddressAction(rawAction)) return null;
+		const slug =
+			typeof parsed.slug === "string" && parsed.slug.trim().length > 0
+				? parsed.slug.trim()
+				: undefined;
+		const reason =
+			typeof parsed.reason === "string" && parsed.reason.trim().length > 0
+				? parsed.reason.trim()
+				: undefined;
+		// "address" without a slug is meaningless; collapse to no-opinion so the
+		// strategy's fallback path runs instead of trying to address an empty
+		// string.
+		if (rawAction === "address" && !slug) return null;
+		return { action: rawAction, slug, reason };
+	} catch {
+		return null;
+	}
+}
+
+function isSpeakerAddressAction(value: string): value is SpeakerAddressAction {
+	return (SPEAKER_ADDRESS_ACTIONS as readonly string[]).includes(value);
+}
+
+/**
  * Strip orchestration control JSON from a message body when re-feeding it to
  * other minds. Prevents moderator routing decisions from leaking into the
  * speakers' history context.
@@ -267,12 +501,18 @@ export function stripControlJson(
 	text: string,
 	actions: Set<string> = CONTROL_ACTIONS,
 ): string {
-	const json = extractJsonObject(text);
+	// Look at the trailing object so a JSON code example earlier in a
+	// speaker's prose does not get stripped while leaving the real control
+	// tail in place.
+	const json = extractTrailingJsonObject(text);
 	if (!json) return text;
 	try {
 		const parsed = JSON.parse(json) as Record<string, unknown>;
 		if (typeof parsed.action === "string" && actions.has(parsed.action)) {
-			return text.replace(json, "").trim();
+			// `lastIndexOf` ensures we strip the trailing occurrence even if
+			// the same JSON literal appears earlier in the prose.
+			const idx = text.lastIndexOf(json);
+			return (text.slice(0, idx) + text.slice(idx + json.length)).trim();
 		}
 	} catch {
 		// not JSON — leave as-is

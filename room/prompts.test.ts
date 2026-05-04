@@ -4,11 +4,14 @@ import { describe, expect, test } from "bun:test";
 import {
 	buildConcurrentSynthesisPrompt,
 	buildModeratorPrompt,
+	buildOpenFloorOpenerPrompt,
 	buildSpeakerPrompt,
 	buildSynthesisPrompt,
 	CONTROL_ACTIONS,
 	extractJsonObject,
+	extractTrailingJsonObject,
 	parseModeratorDecision,
+	parseSpeakerAddress,
 	stripControlJson,
 } from "./prompts.ts";
 
@@ -68,6 +71,61 @@ describe("buildSpeakerPrompt", () => {
 		expect(out).not.toContain("<script>");
 		expect(out).toContain("&lt;script&gt;");
 		expect(out).toContain("&amp;");
+	});
+
+	test("addressingEnabled appends the addressing-options trailer", () => {
+		const out = buildSpeakerPrompt({
+			mindSlug: "ariadne",
+			mode: "group-chat",
+			participants: ["ariadne", "mycroft", "scout"],
+			userMessage: "ship?",
+			history: [],
+			addressingEnabled: true,
+		});
+		expect(out).toContain("<addressing-options>");
+		expect(out).toContain('"action": "address"');
+		expect(out).toContain("mycroft, scout");
+		expect(out).toContain('"action": "pass"');
+		expect(out).toContain('"action": "end"');
+	});
+
+	test("addressingEnabled false omits the trailer (default)", () => {
+		const out = buildSpeakerPrompt({
+			mindSlug: "ariadne",
+			mode: "group-chat",
+			participants: ["ariadne", "mycroft"],
+			userMessage: "ship?",
+			history: [],
+		});
+		expect(out).not.toContain("<addressing-options>");
+	});
+
+	test("addressedFrom lifts the addressee block above the user message", () => {
+		const out = buildSpeakerPrompt({
+			mindSlug: "mycroft",
+			mode: "open-floor",
+			participants: ["ariadne", "mycroft"],
+			userMessage: "ship?",
+			history: [],
+			addressedFrom: { slug: "ariadne", reason: "push back on cost" },
+		});
+		expect(out).toContain('<addressed-to-you sender="ariadne"');
+		expect(out).toContain("push back on cost");
+		expect(out.indexOf("<addressed-to-you")).toBeLessThan(
+			out.indexOf('<message sender="You">'),
+		);
+	});
+
+	test("addressedFrom without reason still renders the block", () => {
+		const out = buildSpeakerPrompt({
+			mindSlug: "mycroft",
+			mode: "open-floor",
+			participants: ["ariadne", "mycroft"],
+			userMessage: "ship?",
+			history: [],
+			addressedFrom: { slug: "ariadne" },
+		});
+		expect(out).toContain('<addressed-to-you sender="ariadne"/>');
 	});
 });
 
@@ -137,6 +195,46 @@ describe("buildModeratorPrompt", () => {
 		expect(out).not.toContain('"next_speaker":"x"');
 		expect(out).toContain('<turn speaker="ariadne" turn="1">Some text</turn>');
 	});
+
+	test("speakerSuggestion renders a hint with reason", () => {
+		const out = buildModeratorPrompt({
+			moderatorSlug: "chairman",
+			speakers: ["ariadne", "mycroft", "scout"],
+			userMessage: "ship?",
+			transcript: [{ speaker: "ariadne", content: "yes", turnNumber: 1 }],
+			phase: "moderate",
+			spokenSlugs: new Set(["ariadne"]),
+			speakerSuggestion: { slug: "mycroft", reason: "data angle" },
+		});
+		expect(out).toContain('<speaker-suggestion slug="mycroft" reason="data angle"/>');
+		expect(out).toContain("Honor this unless that speaker has already hit the repeat cap");
+	});
+
+	test("speakerSuggestion without reason still renders", () => {
+		const out = buildModeratorPrompt({
+			moderatorSlug: "chairman",
+			speakers: ["ariadne", "mycroft"],
+			userMessage: "ship?",
+			transcript: [{ speaker: "ariadne", content: "yes", turnNumber: 1 }],
+			phase: "moderate",
+			spokenSlugs: new Set(["ariadne"]),
+			speakerSuggestion: { slug: "mycroft" },
+		});
+		expect(out).toContain('<speaker-suggestion slug="mycroft"/>');
+		expect(out).not.toContain("reason=");
+	});
+
+	test("absent speakerSuggestion omits the hint block", () => {
+		const out = buildModeratorPrompt({
+			moderatorSlug: "chairman",
+			speakers: ["ariadne", "mycroft"],
+			userMessage: "ship?",
+			transcript: [],
+			phase: "open",
+			spokenSlugs: new Set(),
+		});
+		expect(out).not.toContain("<speaker-suggestion");
+	});
 });
 
 describe("buildSynthesisPrompt", () => {
@@ -153,6 +251,51 @@ describe("buildSynthesisPrompt", () => {
 		expect(out).toContain("<group-chat-synthesis");
 		expect(out).toContain("jarvis");
 		expect(out).toContain("Speak in your own voice");
+	});
+});
+
+describe("buildOpenFloorOpenerPrompt", () => {
+	test("emits the user question and asks for a routing JSON", () => {
+		const out = buildOpenFloorOpenerPrompt({
+			openerSlug: "chairman",
+			participants: ["ariadne", "mycroft"],
+			userMessage: "should we ship?",
+			history: [],
+		});
+		expect(out).toContain("<open-floor-open");
+		expect(out).toContain("should we ship?");
+		expect(out).toContain('"next_speaker"');
+		expect(out).toContain('"action": "direct"');
+	});
+
+	test("renders prior-rounds when history is present", () => {
+		const out = buildOpenFloorOpenerPrompt({
+			openerSlug: "chairman",
+			participants: ["ariadne", "mycroft"],
+			userMessage: "next?",
+			history: [
+				{ speaker: "user", content: "earlier" },
+				{ speaker: "ariadne", content: "earlier reply" },
+			],
+		});
+		expect(out).toContain("<prior-rounds>");
+		expect(out).toContain("earlier reply");
+	});
+
+	test("strips control JSON from history turns", () => {
+		const out = buildOpenFloorOpenerPrompt({
+			openerSlug: "chairman",
+			participants: ["ariadne"],
+			userMessage: "next?",
+			history: [
+				{
+					speaker: "ariadne",
+					content: 'said something {"action":"end","reason":"done"}',
+				},
+			],
+		});
+		expect(out).toContain("said something");
+		expect(out).not.toContain('"action":"end"');
 	});
 });
 
@@ -266,5 +409,139 @@ describe("stripControlJson", () => {
 		expect(CONTROL_ACTIONS.has("close")).toBe(true);
 		expect(CONTROL_ACTIONS.has("direct")).toBe(true);
 		expect(CONTROL_ACTIONS.has("handoff")).toBe(true);
+	});
+
+	test("CONTROL_ACTIONS includes speaker-side addressing actions", () => {
+		expect(CONTROL_ACTIONS.has("address")).toBe(true);
+		expect(CONTROL_ACTIONS.has("pass")).toBe(true);
+		expect(CONTROL_ACTIONS.has("end")).toBe(true);
+	});
+
+	test("stripControlJson removes speaker address tails", () => {
+		const text = `My take... {"action":"address","slug":"bob","reason":"push back"}`;
+		expect(stripControlJson(text)).toBe("My take...");
+	});
+
+	test("stripControlJson strips only the trailing control tail when an earlier JSON example is present", () => {
+		// Speaker showed a JSON code example mid-prose, then a real control
+		// tail. Only the tail should be stripped — the example is part of
+		// the speaker's content and must survive.
+		const text =
+			'Here is the moderator format: {"action":"close"}. ' +
+			'For my take: yes. ' +
+			'{"action":"address","slug":"bob","reason":"why"}';
+		const stripped = stripControlJson(text);
+		expect(stripped).toContain('{"action":"close"}');
+		expect(stripped).not.toContain('{"action":"address"');
+	});
+});
+
+describe("extractTrailingJsonObject", () => {
+	test("returns the last balanced top-level object", () => {
+		const text =
+			'before {"example":1} middle {"action":"address","slug":"bob"}';
+		expect(extractTrailingJsonObject(text)).toBe(
+			'{"action":"address","slug":"bob"}',
+		);
+	});
+
+	test("returns the only object when there is just one", () => {
+		const text = 'prelude {"action":"end"}';
+		expect(extractTrailingJsonObject(text)).toBe('{"action":"end"}');
+	});
+
+	test("ignores braces inside strings", () => {
+		const text = 'prose {"text":"open { brace"} {"action":"end"}';
+		expect(extractTrailingJsonObject(text)).toBe('{"action":"end"}');
+	});
+
+	test("handles nested objects", () => {
+		const text = 'first {"a":1} second {"outer":{"inner":"x"},"b":2}';
+		expect(extractTrailingJsonObject(text)).toBe(
+			'{"outer":{"inner":"x"},"b":2}',
+		);
+	});
+
+	test("returns null when no object is present", () => {
+		expect(extractTrailingJsonObject("no braces here")).toBeNull();
+	});
+
+	test("bails on unbalanced trailing brace rather than looping", () => {
+		const text = '{"a":1} then a stray { with no close';
+		// First object is balanced; second is not. Helper returns the last
+		// balanced object found before the unbalanced opener.
+		expect(extractTrailingJsonObject(text)).toBe('{"a":1}');
+	});
+});
+
+describe("parseSpeakerAddress", () => {
+	test("parses an address action with slug and reason", () => {
+		const text = `prelude {"action":"address","slug":"alice","reason":"cost angle"}`;
+		expect(parseSpeakerAddress(text)).toEqual({
+			action: "address",
+			slug: "alice",
+			reason: "cost angle",
+		});
+	});
+
+	test("parses a pass action", () => {
+		const text = `Done. {"action":"pass","reason":"no preference"}`;
+		expect(parseSpeakerAddress(text)).toEqual({
+			action: "pass",
+			reason: "no preference",
+		});
+	});
+
+	test("parses an end action", () => {
+		const text = `Wrapping up. {"action":"end","reason":"converged"}`;
+		expect(parseSpeakerAddress(text)).toEqual({
+			action: "end",
+			reason: "converged",
+		});
+	});
+
+	test("collapses address-without-slug to null", () => {
+		const text = `body {"action":"address"}`;
+		expect(parseSpeakerAddress(text)).toBeNull();
+	});
+
+	test("rejects unknown action", () => {
+		const text = `body {"action":"nope","slug":"bob"}`;
+		expect(parseSpeakerAddress(text)).toBeNull();
+	});
+
+	test("returns null when no JSON tail is present", () => {
+		expect(parseSpeakerAddress("just a free-form reply")).toBeNull();
+	});
+
+	test("returns null when JSON is malformed", () => {
+		expect(parseSpeakerAddress("body {not json}")).toBeNull();
+	});
+
+	test("trims whitespace from slug and reason", () => {
+		const text = `body {"action":"address","slug":"  alice  ","reason":"  why  "}`;
+		expect(parseSpeakerAddress(text)).toEqual({
+			action: "address",
+			slug: "alice",
+			reason: "why",
+		});
+	});
+
+	test("parses the trailing tail when an earlier JSON example appears in prose", () => {
+		const text =
+			'Here is what JSON looks like: {"example":42}. ' +
+			'My take is X. ' +
+			'{"action":"address","slug":"bob","reason":"data angle"}';
+		expect(parseSpeakerAddress(text)).toEqual({
+			action: "address",
+			slug: "bob",
+			reason: "data angle",
+		});
+	});
+
+	test("ignores a non-control trailing object even with prose-front content", () => {
+		const text =
+			'Some thoughts. {"random":"object","action":"unknown"}';
+		expect(parseSpeakerAddress(text)).toBeNull();
 	});
 });

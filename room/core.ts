@@ -15,11 +15,28 @@ import path from "node:path";
 import { assertInsideProject, slugify } from "../genesis/core.ts";
 import { listGenesisMinds, normalizeMindSlug } from "../mind/core.ts";
 
-export const ROOM_MODES = ["concurrent", "sequential", "group-chat"] as const;
+export const ROOM_MODES = [
+	"concurrent",
+	"sequential",
+	"group-chat",
+	"open-floor",
+] as const;
 export const DEFAULT_ROOM_MODE: RoomMode = "concurrent";
 export const DEFAULT_GROUP_CHAT_MAX_TURNS = 4;
 export const DEFAULT_GROUP_CHAT_MIN_ROUNDS = 1;
 export const DEFAULT_GROUP_CHAT_REPEAT_CAP = 2;
+export const DEFAULT_OPEN_FLOOR_MAX_TURNS = 6;
+export const DEFAULT_OPEN_FLOOR_MIN_ROUNDS = 1;
+export const DEFAULT_OPEN_FLOOR_REPEAT_CAP = 2;
+/**
+ * Fraction of speakers whose `{action:"end"}` votes the round must EXCEED
+ * (after `minRounds` is met) before open-floor closes early. Strict-`>`
+ * comparison: with the default 0.5, a tie (e.g. 1/2 or 2/4) does NOT close —
+ * "simple majority" means more than half. Set higher to require near-consensus,
+ * or lower (down to a value just under the smallest representable ratio) to
+ * let any single end vote close the room.
+ */
+export const DEFAULT_OPEN_FLOOR_END_VOTE_THRESHOLD = 0.5;
 export const ROOM_STATE_CUSTOM_TYPE = "room-state";
 export const ROOMS_BASE_DIR = ".pi/rooms";
 export const SAVED_ROOM_CONFIG_FILE = "room.json";
@@ -57,6 +74,18 @@ export type GroupChatOverrides = {
 	maxSpeakerRepeats?: number;
 };
 
+export type OpenFloorOverrides = {
+	maxTurns?: number;
+	minRounds?: number;
+	maxSpeakerRepeats?: number;
+	/**
+	 * Fraction (0..1] of speakers whose `end` votes the ratio must EXCEED
+	 * (strict `>`) after `minRounds` is met before the room closes. Default
+	 * `DEFAULT_OPEN_FLOOR_END_VOTE_THRESHOLD`. A tie does not close.
+	 */
+	endVoteThreshold?: number;
+};
+
 export type SavedRoom = {
 	slug: string;
 	name: string;
@@ -68,6 +97,20 @@ export type SavedRoom = {
 	synthesizer?: string;
 	concurrentSynthesis?: boolean | "chairman" | string;
 	forkPerMind?: boolean;
+	/**
+	 * Group-chat only. When true, speakers may append a JSON tail suggesting
+	 * who should speak next; the moderator is biased toward honoring it. Off by
+	 * default to preserve current behavior.
+	 */
+	speakerAddressing?: boolean;
+	/** Open-floor mode tunables (see OpenFloorOverrides). */
+	openFloor?: OpenFloorOverrides;
+	/**
+	 * Open-floor only. Optional opening voice that sets the topic before
+	 * speakers route the floor among themselves. `"chairman"` uses the built-in
+	 * neutral moderator; any other value must be a participant slug.
+	 */
+	opener?: "chairman" | string;
 };
 
 export type SavedRoomSummary = {
@@ -320,6 +363,9 @@ export function latestRoomState(
 export type RoomDescriptionOverrides = {
 	synthesizer?: string;
 	groupChat?: GroupChatOverrides;
+	speakerAddressing?: boolean;
+	openFloor?: OpenFloorOverrides;
+	opener?: string;
 };
 
 export function describeRoomState(
@@ -329,15 +375,39 @@ export function describeRoomState(
 	if (!state?.active) return "Room off.";
 	const participants = state.participants.join(", ");
 	const base = `Room active: ${state.mode} with ${state.participants.length} mind${state.participants.length === 1 ? "" : "s"} (${participants}).`;
-	if (state.mode !== "group-chat") return base;
-	const moderator = overrides?.synthesizer ?? "chairman (built-in)";
-	const minRounds =
-		overrides?.groupChat?.minRounds ?? DEFAULT_GROUP_CHAT_MIN_ROUNDS;
-	const maxTurns =
-		overrides?.groupChat?.maxTurns ?? DEFAULT_GROUP_CHAT_MAX_TURNS;
-	const repeatCap =
-		overrides?.groupChat?.maxSpeakerRepeats ?? DEFAULT_GROUP_CHAT_REPEAT_CAP;
-	return `${base} Moderator: ${moderator}. Limits: ${minRounds} min round, ${maxTurns} max turns, ${repeatCap} repeat cap.`;
+	if (state.mode === "group-chat") {
+		const moderator = overrides?.synthesizer ?? "chairman (built-in)";
+		const minRounds =
+			overrides?.groupChat?.minRounds ?? DEFAULT_GROUP_CHAT_MIN_ROUNDS;
+		const maxTurns =
+			overrides?.groupChat?.maxTurns ?? DEFAULT_GROUP_CHAT_MAX_TURNS;
+		const repeatCap =
+			overrides?.groupChat?.maxSpeakerRepeats ?? DEFAULT_GROUP_CHAT_REPEAT_CAP;
+		const addressing = overrides?.speakerAddressing
+			? " Speaker addressing: on."
+			: "";
+		return `${base} Moderator: ${moderator}. Limits: ${minRounds} min round, ${maxTurns} max turns, ${repeatCap} repeat cap.${addressing}`;
+	}
+	if (state.mode === "open-floor") {
+		const minRounds =
+			overrides?.openFloor?.minRounds ?? DEFAULT_OPEN_FLOOR_MIN_ROUNDS;
+		const maxTurns =
+			overrides?.openFloor?.maxTurns ?? DEFAULT_OPEN_FLOOR_MAX_TURNS;
+		const repeatCap =
+			overrides?.openFloor?.maxSpeakerRepeats ?? DEFAULT_OPEN_FLOOR_REPEAT_CAP;
+		const endThreshold =
+			overrides?.openFloor?.endVoteThreshold ?? DEFAULT_OPEN_FLOOR_END_VOTE_THRESHOLD;
+		const opener = overrides?.opener
+			? overrides.opener === "chairman"
+				? "chairman (built-in)"
+				: overrides.opener
+			: "first participant";
+		const synthesizerNote = overrides?.synthesizer
+			? ` Synthesizer: ${overrides.synthesizer}.`
+			: "";
+		return `${base} Opener: ${opener}.${synthesizerNote} Limits: ${minRounds} min round, ${maxTurns} max turns, ${repeatCap} repeat cap, ${Math.round(endThreshold * 100)}% end-vote.`;
+	}
+	return base;
 }
 
 export function xmlEscape(value: string): string {
@@ -606,6 +676,54 @@ function coerceForkPerMind(value: unknown): boolean | undefined {
 	return typeof value === "boolean" ? value : undefined;
 }
 
+function coerceSpeakerAddressing(value: unknown): boolean | undefined {
+	return typeof value === "boolean" ? value : undefined;
+}
+
+function coerceOpenFloorOverrides(value: unknown): OpenFloorOverrides | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	const raw = value as Record<string, unknown>;
+	const out: OpenFloorOverrides = {};
+	if (
+		typeof raw.maxTurns === "number" &&
+		Number.isFinite(raw.maxTurns) &&
+		raw.maxTurns > 0
+	) {
+		out.maxTurns = Math.floor(raw.maxTurns);
+	}
+	if (
+		typeof raw.minRounds === "number" &&
+		Number.isFinite(raw.minRounds) &&
+		raw.minRounds > 0
+	) {
+		out.minRounds = Math.floor(raw.minRounds);
+	}
+	if (
+		typeof raw.maxSpeakerRepeats === "number" &&
+		Number.isFinite(raw.maxSpeakerRepeats) &&
+		raw.maxSpeakerRepeats > 0
+	) {
+		out.maxSpeakerRepeats = Math.floor(raw.maxSpeakerRepeats);
+	}
+	if (
+		typeof raw.endVoteThreshold === "number" &&
+		Number.isFinite(raw.endVoteThreshold) &&
+		raw.endVoteThreshold > 0 &&
+		raw.endVoteThreshold <= 1
+	) {
+		out.endVoteThreshold = raw.endVoteThreshold;
+	}
+	return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function coerceOpener(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const trimmed = value.trim();
+	if (!trimmed) return undefined;
+	if (trimmed === "chairman") return "chairman";
+	return SLUG_PATTERN.test(trimmed) ? trimmed : undefined;
+}
+
 function applySavedRoomOptionals(
 	target: SavedRoom,
 	source: Partial<SavedRoom> | Record<string, unknown>,
@@ -620,6 +738,16 @@ function applySavedRoomOptionals(
 	if (concurrentSynthesis !== undefined) target.concurrentSynthesis = concurrentSynthesis;
 	const forkPerMind = coerceForkPerMind((source as Record<string, unknown>).forkPerMind);
 	if (forkPerMind !== undefined) target.forkPerMind = forkPerMind;
+	const speakerAddressing = coerceSpeakerAddressing(
+		(source as Record<string, unknown>).speakerAddressing,
+	);
+	if (speakerAddressing !== undefined) target.speakerAddressing = speakerAddressing;
+	const openFloor = coerceOpenFloorOverrides(
+		(source as Record<string, unknown>).openFloor,
+	);
+	if (openFloor) target.openFloor = openFloor;
+	const opener = coerceOpener((source as Record<string, unknown>).opener);
+	if (opener) target.opener = opener;
 	return target;
 }
 

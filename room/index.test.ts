@@ -1135,6 +1135,133 @@ describe("room extension", () => {
 		});
 	});
 
+	test("/next accepts a valid speaker in open-floor mode", async () => {
+		await withTempProject(async (cwd) => {
+			writeCompleteMind(cwd, "ariadne");
+			writeCompleteMind(cwd, "mycroft");
+			const roomDir = path.join(cwd, ".pi/rooms/town-hall");
+			fs.mkdirSync(roomDir, { recursive: true });
+			const now = new Date().toISOString();
+			fs.writeFileSync(
+				path.join(roomDir, "room.json"),
+				JSON.stringify({
+					slug: "town-hall",
+					name: "town-hall",
+					mode: "open-floor",
+					participants: ["ariadne", "mycroft"],
+					createdAt: now,
+					updatedAt: now,
+				}),
+				"utf-8",
+			);
+			const entries = [
+				roomStateEntry({
+					active: true,
+					mode: "open-floor",
+					participants: ["ariadne", "mycroft"],
+					slug: "town-hall",
+					name: "town-hall",
+				}),
+			];
+			const harness = createHarness();
+			const ctx = createContext(cwd, entries);
+			await runHandler(harness, "session_start", { reason: "startup" }, ctx);
+			ctx.notifications.length = 0;
+
+			await harness.commands.get("next")?.handler("mycroft", ctx);
+
+			expect(ctx.notifications[ctx.notifications.length - 1]).toEqual(
+				expect.objectContaining({
+					type: "info",
+					message: expect.stringContaining("next speaker = mycroft"),
+				}),
+			);
+		});
+	});
+
+	test("/inject accepts text in open-floor mode", async () => {
+		await withTempProject(async (cwd) => {
+			writeCompleteMind(cwd, "ariadne");
+			writeCompleteMind(cwd, "mycroft");
+			const roomDir = path.join(cwd, ".pi/rooms/town-hall");
+			fs.mkdirSync(roomDir, { recursive: true });
+			const now = new Date().toISOString();
+			fs.writeFileSync(
+				path.join(roomDir, "room.json"),
+				JSON.stringify({
+					slug: "town-hall",
+					name: "town-hall",
+					mode: "open-floor",
+					participants: ["ariadne", "mycroft"],
+					createdAt: now,
+					updatedAt: now,
+				}),
+				"utf-8",
+			);
+			const entries = [
+				roomStateEntry({
+					active: true,
+					mode: "open-floor",
+					participants: ["ariadne", "mycroft"],
+					slug: "town-hall",
+					name: "town-hall",
+				}),
+			];
+			const harness = createHarness();
+			const ctx = createContext(cwd, entries);
+			await runHandler(harness, "session_start", { reason: "startup" }, ctx);
+			ctx.notifications.length = 0;
+
+			await harness.commands.get("inject")?.handler("focus on cost", ctx);
+
+			expect(ctx.notifications[ctx.notifications.length - 1]).toEqual(
+				expect.objectContaining({
+					type: "info",
+					message: expect.stringContaining("focus on cost"),
+				}),
+			);
+		});
+	});
+
+	test("session_start in open-floor with chairman opener surfaces chairman as moderator", async () => {
+		await withTempProject(async (cwd) => {
+			writeCompleteMind(cwd, "ariadne");
+			writeCompleteMind(cwd, "mycroft");
+			const roomDir = path.join(cwd, ".pi/rooms/town-hall");
+			fs.mkdirSync(roomDir, { recursive: true });
+			const now = new Date().toISOString();
+			fs.writeFileSync(
+				path.join(roomDir, "room.json"),
+				JSON.stringify({
+					slug: "town-hall",
+					name: "town-hall",
+					mode: "open-floor",
+					participants: ["ariadne", "mycroft"],
+					createdAt: now,
+					updatedAt: now,
+					opener: "chairman",
+				}),
+				"utf-8",
+			);
+			const entries = [
+				roomStateEntry({
+					active: true,
+					mode: "open-floor",
+					participants: ["ariadne", "mycroft"],
+					slug: "town-hall",
+					name: "town-hall",
+				}),
+			];
+			const harness = createHarness();
+			const ctx = createContext(cwd, entries);
+			await runHandler(harness, "session_start", { reason: "startup" }, ctx);
+			const lastWidget = ctx.widgets[ctx.widgets.length - 1];
+			const widgetText = (lastWidget?.content as string[]).join(" ");
+			expect(widgetText).toContain("chairman");
+			expect(widgetText).toContain("(mod)");
+		});
+	});
+
 	test("session_start with a synthesizer puts that mind in the participant widget as moderator", async () => {
 		await withTempProject(async (cwd) => {
 			writeCompleteMind(cwd, "ariadne");

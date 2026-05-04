@@ -5,6 +5,10 @@ import {
 	DEFAULT_GROUP_CHAT_MAX_TURNS,
 	DEFAULT_GROUP_CHAT_MIN_ROUNDS,
 	DEFAULT_GROUP_CHAT_REPEAT_CAP,
+	DEFAULT_OPEN_FLOOR_END_VOTE_THRESHOLD,
+	DEFAULT_OPEN_FLOOR_MAX_TURNS,
+	DEFAULT_OPEN_FLOOR_MIN_ROUNDS,
+	DEFAULT_OPEN_FLOOR_REPEAT_CAP,
 	readRoomTranscript,
 	resolveRoomSessionPath,
 	type RoomMode,
@@ -27,9 +31,10 @@ import {
 	executeStrategy,
 	type GroupChatConfig,
 	type MindSpec,
+	type OpenFloorConfig,
 	type OrchestrationContext,
 	type SpawnFn,
-} from "./strategies.ts";
+} from "./strategies/index.ts";
 import { spawnMind, type SpawnMindResult } from "./spawn.ts";
 import {
 	ROOM_CUSTOM_TYPES,
@@ -491,10 +496,27 @@ export function createTurnOrchestrator(
 						: concurrentSynth
 					: undefined;
 
+			// Resolve open-floor opener and synthesizer. Open-floor uses the
+			// chairman (or a participant slug) as opener; the synthesizer reuses
+			// the saved-room `synthesizer` field. Direct-address turns force
+			// concurrent mode so opener resolution is skipped there.
+			let openFloorOpenerSlug: string | undefined =
+				!options.directAddress && effectiveMode === "open-floor"
+					? savedRoomCfg?.opener
+					: undefined;
+			let openFloorSynthesizerSlug: string | undefined =
+				!options.directAddress &&
+				effectiveMode === "open-floor" &&
+				savedRoomCfg?.synthesizer
+					? savedRoomCfg.synthesizer
+					: undefined;
+
 			const includeChairman =
 				(effectiveMode === "group-chat" &&
 					effectiveModerator === CHAIRMAN_SLUG) ||
-				concurrentSynthSlug === CHAIRMAN_SLUG;
+				concurrentSynthSlug === CHAIRMAN_SLUG ||
+				openFloorOpenerSlug === CHAIRMAN_SLUG ||
+				openFloorSynthesizerSlug === CHAIRMAN_SLUG;
 			const minds = buildMindsBySlug(ctx.cwd, effectiveParticipants, {
 				includeChairman,
 			});
@@ -543,6 +565,44 @@ export function createTurnOrchestrator(
 					concurrentSynthSlug = undefined;
 				}
 			}
+			if (
+				openFloorOpenerSlug &&
+				openFloorOpenerSlug !== CHAIRMAN_SLUG &&
+				!minds.has(openFloorOpenerSlug)
+			) {
+				try {
+					minds.set(
+						openFloorOpenerSlug,
+						ensureMindSpec(ctx.cwd, openFloorOpenerSlug),
+					);
+				} catch (err) {
+					deps.notify(
+						ctx,
+						`Saved-room opener "${openFloorOpenerSlug}" is not loadable (${deps.errorMessage(err)}). Defaulting to first participant.`,
+						"warning",
+					);
+					openFloorOpenerSlug = undefined;
+				}
+			}
+			if (
+				openFloorSynthesizerSlug &&
+				openFloorSynthesizerSlug !== CHAIRMAN_SLUG &&
+				!minds.has(openFloorSynthesizerSlug)
+			) {
+				try {
+					minds.set(
+						openFloorSynthesizerSlug,
+						ensureMindSpec(ctx.cwd, openFloorSynthesizerSlug),
+					);
+				} catch (err) {
+					deps.notify(
+						ctx,
+						`Saved-room synthesizer "${openFloorSynthesizerSlug}" is not loadable (${deps.errorMessage(err)}). Skipping synthesis for this round.`,
+						"warning",
+					);
+					openFloorSynthesizerSlug = undefined;
+				}
+			}
 			const forkPerMindRoomSlug =
 				activeRoom.slug && savedRoomCfg?.forkPerMind
 					? activeRoom.slug
@@ -567,9 +627,36 @@ export function createTurnOrchestrator(
 								DEFAULT_GROUP_CHAT_REPEAT_CAP,
 						}
 					: undefined;
-			const synthesisConfig = concurrentSynthSlug
-				? { mode: concurrentSynthSlug }
-				: undefined;
+			const openFloorConfig: OpenFloorConfig | undefined =
+				effectiveMode === "open-floor"
+					? {
+							maxTurns:
+								savedRoomCfg?.openFloor?.maxTurns ??
+								DEFAULT_OPEN_FLOOR_MAX_TURNS,
+							minRounds:
+								savedRoomCfg?.openFloor?.minRounds ??
+								DEFAULT_OPEN_FLOOR_MIN_ROUNDS,
+							maxSpeakerRepeats:
+								savedRoomCfg?.openFloor?.maxSpeakerRepeats ??
+								DEFAULT_OPEN_FLOOR_REPEAT_CAP,
+							endVoteThreshold:
+								savedRoomCfg?.openFloor?.endVoteThreshold ??
+								DEFAULT_OPEN_FLOOR_END_VOTE_THRESHOLD,
+						}
+					: undefined;
+			// `synthesisConfig` is shared between concurrent (post-parallel
+			// summary) and open-floor (closing voice). Concurrent mode reads
+			// `concurrentSynthesis`; open-floor reads `synthesizer`.
+			const synthesisConfig =
+				effectiveMode === "open-floor"
+					? openFloorSynthesizerSlug
+						? { mode: openFloorSynthesizerSlug }
+						: undefined
+					: concurrentSynthSlug
+						? { mode: concurrentSynthSlug }
+						: undefined;
+			const speakerAddressing =
+				effectiveMode === "group-chat" && Boolean(savedRoomCfg?.speakerAddressing);
 			const result = await executeStrategy({
 				mode: effectiveMode,
 				userMessage,
@@ -579,7 +666,10 @@ export function createTurnOrchestrator(
 				roundHistory: buildPriorRoundsHistory(ctx),
 				context: orchestration,
 				groupChatConfig,
+				openFloorConfig,
 				synthesisConfig,
+				...(speakerAddressing ? { speakerAddressing: true } : {}),
+				...(openFloorOpenerSlug ? { openerSlug: openFloorOpenerSlug } : {}),
 			});
 			persistRoundToDisk(
 				ctx,

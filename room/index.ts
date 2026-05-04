@@ -146,6 +146,14 @@ export default function (pi: ExtensionAPI) {
 			state.mode === "group-chat"
 				? synthesizer ?? CHAIRMAN_SLUG
 				: undefined;
+		// Open-floor: the opener (when set) and the synthesizer (when set)
+		// both take the moderator role in the participant bar. The opener is
+		// optional and the synthesizer is independent — surface whichever
+		// applies so the user sees who the auxiliary voices are.
+		const openFloorOpener =
+			state.mode === "open-floor" ? saved?.opener : undefined;
+		const openFloorSynthesizer =
+			state.mode === "open-floor" ? synthesizer : undefined;
 
 		const slugs: string[] = [...state.participants];
 		const moderatorSlugs = new Set<string>();
@@ -156,6 +164,15 @@ export default function (pi: ExtensionAPI) {
 		if (concurrentSynthSlug) {
 			moderatorSlugs.add(concurrentSynthSlug);
 			if (!slugs.includes(concurrentSynthSlug)) slugs.push(concurrentSynthSlug);
+		}
+		if (openFloorOpener) {
+			moderatorSlugs.add(openFloorOpener);
+			if (!slugs.includes(openFloorOpener)) slugs.push(openFloorOpener);
+		}
+		if (openFloorSynthesizer) {
+			moderatorSlugs.add(openFloorSynthesizer);
+			if (!slugs.includes(openFloorSynthesizer))
+				slugs.push(openFloorSynthesizer);
 		}
 
 		return slugs.map((slug) => ({
@@ -177,6 +194,9 @@ export default function (pi: ExtensionAPI) {
 				? {
 						synthesizer: saved.synthesizer,
 						groupChat: saved.groupChat,
+						speakerAddressing: saved.speakerAddressing,
+						openFloor: saved.openFloor,
+						opener: saved.opener,
 					}
 				: undefined,
 		);
@@ -472,28 +492,34 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("next", {
 		description:
-			"Override the moderator's next-speaker pick (group-chat only). Usage: /next <slug>",
+			"Override the next-speaker pick (group-chat or open-floor). Usage: /next <slug>",
 		handler: async (args, ctxRaw) => {
 			const ctx = ctxRaw as RoomCommandContext;
 			if (!activeRoom?.active) {
 				notify(ctx, "No active room. Use /room first.", "error");
 				return;
 			}
-			if (activeRoom.mode !== "group-chat") {
+			if (
+				activeRoom.mode !== "group-chat" &&
+				activeRoom.mode !== "open-floor"
+			) {
 				notify(
 					ctx,
-					"/next applies only to group-chat mode rooms.",
+					"/next applies to group-chat and open-floor rooms only.",
 					"error",
 				);
 				return;
 			}
-			// Speakable set excludes the moderator: `executeGroupChat` filters
-			// the moderator out of its `speakers` set, so `/next <moderator>`
-			// would silently no-op during routing. Reject it up front.
+			// Speakable set excludes the moderator/opener slot: those minds are
+			// not in `speakers` for routing purposes, so a /next override on
+			// them would silently no-op. Reject it up front.
 			const savedRoomCfg = activeRoom.slug
 				? safeReadSavedRoom(ctx.cwd, activeRoom.slug)
 				: undefined;
-			const moderatorSlug = savedRoomCfg?.synthesizer ?? CHAIRMAN_SLUG;
+			const moderatorSlug =
+				activeRoom.mode === "group-chat"
+					? savedRoomCfg?.synthesizer ?? CHAIRMAN_SLUG
+					: undefined;
 			const speakers = activeRoom.participants.filter(
 				(p) => p !== moderatorSlug,
 			);
@@ -520,15 +546,22 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("inject", {
 		description:
-			"Prepend a moderator-style direction to the next speaker's prompt (group-chat). Usage: /inject <text>",
+			"Prepend a director note to the next speaker's prompt (group-chat or open-floor). Usage: /inject <text>",
 		handler: async (args, ctxRaw) => {
 			const ctx = ctxRaw as RoomCommandContext;
 			if (!activeRoom?.active) {
 				notify(ctx, "No active room. Use /room first.", "error");
 				return;
 			}
-			if (activeRoom.mode !== "group-chat") {
-				notify(ctx, "/inject applies only to group-chat mode rooms.", "error");
+			if (
+				activeRoom.mode !== "group-chat" &&
+				activeRoom.mode !== "open-floor"
+			) {
+				notify(
+					ctx,
+					"/inject applies to group-chat and open-floor rooms only.",
+					"error",
+				);
 				return;
 			}
 			const text = (args || "").trim();
@@ -728,6 +761,7 @@ export default function (pi: ExtensionAPI) {
 			"concurrent — parallel takes from each mind",
 			"sequential — ordered critique / refinement chain",
 			"group-chat — moderator routes the floor",
+			"open-floor — minds route the floor themselves",
 		]);
 		if (!selectedMode) return;
 		const mode = modeFromSelection(selectedMode);
@@ -1236,6 +1270,9 @@ function usageText(cwd: string): string {
 		"  /room list         list saved rooms",
 		"  /room reset [<slug>] drop per-mind sessions (forkPerMind rooms only)",
 		"  /room help         show this usage",
+		"  /halt              abort the in-flight round (any mode)",
+		"  /next <slug>       override the next-speaker pick (group-chat or open-floor)",
+		"  /inject <text>     prepend a director note to the next speaker (group-chat or open-floor)",
 		"Saved rooms live in .pi/rooms/<slug>/ and persist across sessions.",
 		"Power-user direct subcommands (on/mode/minds/clear) still work.",
 	].join("\n");
