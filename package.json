@@ -2,8 +2,17 @@
   "name": "pi-chamber",
   "version": "0.1.0",
   "description": "Pi extension package: durable agent identities (Genesis minds), single- and multi-mind conversations (mind, room), and a TUI lens viewer (observatory).",
-  "type": "module",
+  "author": "Daniel Scholl",
   "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/danielscholl/pi-chamber.git"
+  },
+  "homepage": "https://github.com/danielscholl/pi-chamber#readme",
+  "bugs": {
+    "url": "https://github.com/danielscholl/pi-chamber/issues"
+  },
   "keywords": [
     "pi-package",
     "pi",
@@ -23,7 +32,9 @@
     "shared/**",
     "dist/**",
     "README.md",
-    "AGENTS.md"
+    "AGENTS.md",
+    "CHANGELOG.md",
+    "LICENSE"
   ],
   "scripts": {
     "test": "bun test",
@@ -32,6 +43,18 @@
   },
   "dependencies": {
     "typebox": "^1.1.24"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*"
+  },
+  "peerDependenciesMeta": {
+    "@mariozechner/pi-coding-agent": {
+      "optional": true
+    },
+    "@mariozechner/pi-tui": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@mariozechner/pi-coding-agent": "*",

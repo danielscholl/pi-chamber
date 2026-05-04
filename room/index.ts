@@ -477,7 +477,7 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"Abort the active room round. Partial replies are kept and marked aborted.",
 		handler: async (_args, ctxRaw) => {
-			const ctx = ctxRaw as RoomCommandContext;
+			const ctx = ctxRaw as unknown as RoomCommandContext;
 			if (!activeRoom?.active) {
 				notify(ctx, "No active room round to halt.", "warning");
 				return;
@@ -494,7 +494,7 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"Override the next-speaker pick (group-chat or open-floor). Usage: /next <slug>",
 		handler: async (args, ctxRaw) => {
-			const ctx = ctxRaw as RoomCommandContext;
+			const ctx = ctxRaw as unknown as RoomCommandContext;
 			if (!activeRoom?.active) {
 				notify(ctx, "No active room. Use /room first.", "error");
 				return;
@@ -548,7 +548,7 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"Prepend a director note to the next speaker's prompt (group-chat or open-floor). Usage: /inject <text>",
 		handler: async (args, ctxRaw) => {
-			const ctx = ctxRaw as RoomCommandContext;
+			const ctx = ctxRaw as unknown as RoomCommandContext;
 			if (!activeRoom?.active) {
 				notify(ctx, "No active room. Use /room first.", "error");
 				return;
