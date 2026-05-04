@@ -32,36 +32,6 @@ Add to your project's `.pi/settings.json`:
 }
 ```
 
-> Pin to a tag once releases are cut, e.g. `git:github.com/danielscholl/pi-chamber@v0.1.0`.
-
-### From npm (future, once published)
-
-```bash
-pi install npm:pi-chamber
-```
-
-```jsonc
-// .pi/settings.json
-{
-  "packages": ["npm:pi-chamber"]
-}
-```
-
-### Local development (sibling repo layout)
-
-If you have `pi-chamber` checked out next to your consumer project, point at the feature entries directly:
-
-```jsonc
-// .pi/settings.json
-{
-  "extensions": [
-    "../pi-chamber/genesis/index.ts",
-    "../pi-chamber/mind/index.ts",
-    "../pi-chamber/room/index.ts",
-    "../pi-chamber/observatory/index.ts"
-  ]
-}
-```
 
 ## Quick Start
 
@@ -75,10 +45,10 @@ Walks you through naming, role, expertise, and seed notes. Writes:
 
 ```
 .pi/minds/<slug>/
-  identity.md      # persona + voice
-  memory.md        # durable knowledge (editable)
-  rules.md         # behavioral guardrails
-  log.md           # turn-by-turn log (auto-appended)
+  identity.md          # persona + voice
+  memory.md            # durable knowledge (editable)
+  rules.md             # behavioral guardrails
+  log.md               # turn-by-turn log (auto-appended)
 .pi/agents/<slug>.md   # runnable shim (compatible with pi-subagents)
 .pi/observatory/lenses/<slug>-newspaper/   # starter briefing lens
 ```
