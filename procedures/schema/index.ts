@@ -8,15 +8,15 @@
  */
 
 // Command name validation
-export { isValidCommandName } from './command-validation';
+export { isValidCommandName } from './command-validation.ts';
 
 // Retry configuration
-export { stepRetryConfigSchema } from './retry';
-export type { StepRetryConfig } from './retry';
+export { stepRetryConfigSchema } from './retry.ts';
+export type { StepRetryConfig } from './retry.ts';
 
 // Loop node configuration
-export { loopNodeConfigSchema } from './loop';
-export type { LoopNodeConfig } from './loop';
+export { loopNodeConfigSchema } from './loop.ts';
+export type { LoopNodeConfig } from './loop.ts';
 
 // Hooks
 export {
@@ -24,8 +24,8 @@ export {
 	workflowHookMatcherSchema,
 	workflowNodeHooksSchema,
 	WORKFLOW_HOOK_EVENTS,
-} from './hooks';
-export type { WorkflowHookEvent, WorkflowHookMatcher, WorkflowNodeHooks } from './hooks';
+} from './hooks.ts';
+export type { WorkflowHookEvent, WorkflowHookMatcher, WorkflowNodeHooks } from './hooks.ts';
 
 // DAG node types
 export {
@@ -54,7 +54,7 @@ export {
 	thinkingConfigSchema,
 	sandboxSettingsSchema,
 	agentDefinitionSchema,
-} from './dag-node';
+} from './dag-node.ts';
 export type {
 	TriggerRule,
 	DagNodeBase,
@@ -71,7 +71,7 @@ export type {
 	ThinkingConfig,
 	SandboxSettings,
 	AgentDefinition,
-} from './dag-node';
+} from './dag-node.ts';
 
 // Workflow definition
 export {
@@ -79,7 +79,7 @@ export {
 	webSearchModeSchema,
 	workflowBaseSchema,
 	workflowDefinitionSchema,
-} from './workflow';
+} from './workflow.ts';
 export type {
 	ModelReasoningEffort,
 	WebSearchMode,
@@ -91,7 +91,7 @@ export type {
 	WorkflowLoadResult,
 	WorkflowSource,
 	WorkflowWithSource,
-} from './workflow';
+} from './workflow.ts';
 
 // Workflow run state
 export {
@@ -104,7 +104,7 @@ export {
 	TERMINAL_WORKFLOW_STATUSES,
 	RESUMABLE_WORKFLOW_STATUSES,
 	isApprovalContext,
-} from './workflow-run';
+} from './workflow-run.ts';
 export type {
 	WorkflowRunStatus,
 	WorkflowStepStatus,
@@ -113,4 +113,4 @@ export type {
 	WorkflowRun,
 	ArtifactType,
 	ApprovalContext,
-} from './workflow-run';
+} from './workflow-run.ts';

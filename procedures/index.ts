@@ -26,18 +26,18 @@ import {
 import { executeWorkflow } from "./executor.ts";
 import { type WorkflowLoadWarning } from "./loader.ts";
 import {
-	formatRunCancelled,
-	formatRunComplete,
-	formatRunFailed,
+	formatProcedureOption,
+	formatProcedureReceipt,
 	formatRunStatus,
 	formatStrictRefusal,
 	formatUnknownProcedure,
 	formatWarnings,
 	formatWorkflowList,
+	parseProcedureChoice,
 } from "./prompts.ts";
 import { createRun, listRuns, readEvents, resolveRunPaths } from "./store.ts";
 import {
-	emitNodeNotice,
+	emitProcedureReceipt,
 	renderWorkflowDag,
 	startProcedurePanel,
 } from "./ui.ts";
@@ -51,6 +51,7 @@ export interface ProceduresCommandContext {
 	hasUI: boolean;
 	ui: {
 		notify(message: string, type?: "info" | "warning" | "error"): void;
+		select?(prompt: string, options: string[]): Promise<string | undefined>;
 		setStatus?(key: string, value: string): void;
 		setWidget?(
 			key: string,
@@ -88,6 +89,7 @@ export async function runProceduresCommand(
 
 	switch (parsed.mode) {
 		case "picker":
+			return runPickerCommand(ctx, paths);
 		case "list":
 			return runListCommand(ctx, paths);
 		case "show":
@@ -121,6 +123,34 @@ function runListCommand(
 	for (const err of discovery.errors) {
 		ctx.ui.notify(`load error: ${err.filename}: ${err.error}`, "warning");
 	}
+}
+
+async function runPickerCommand(
+	ctx: ProceduresCommandContext,
+	paths: ReturnType<typeof resolveProceduresPaths>,
+): Promise<void> {
+	const discovery = discoverProcedures(paths);
+	for (const err of discovery.errors) {
+		ctx.ui.notify(`load error: ${err.filename}: ${err.error}`, "warning");
+	}
+	if (discovery.workflows.length === 0) {
+		ctx.ui.notify(formatWorkflowList(discovery.workflows), "warning");
+		return;
+	}
+	if (!ctx.hasUI || !ctx.ui.select) {
+		ctx.ui.notify(formatWorkflowList(discovery.workflows), "info");
+		return;
+	}
+
+	const options = discovery.workflows.map(formatProcedureOption);
+	const choice = await ctx.ui.select("Procedures:", options);
+	if (!choice) return;
+	const name = parseProcedureChoice(choice, discovery.workflows);
+	if (!name) {
+		ctx.ui.notify("Could not resolve the selected procedure.", "warning");
+		return;
+	}
+	await runRunCommand(ctx, paths, name, [], false);
 }
 
 function runShowCommand(
@@ -192,7 +222,6 @@ async function runRunCommand(
 		workflow_name: found.workflow.name,
 		user_message: workflowArgs.join(" "),
 	});
-	ctx.ui.notify(`Started procedure run ${run.id} (${found.workflow.name}).`, "info");
 
 	const stopPanel = startProcedurePanel(ctx, found.workflow, run.id);
 	const controller = new AbortController();
@@ -208,45 +237,18 @@ async function runRunCommand(
 			onDelta: undefined,
 		});
 
-		// Per-node summary lines after run completes (so the user sees the shape).
-		for (const [nodeId, output] of result.nodeOutputs.entries()) {
-			const detail = output.state === "failed" ? truncate(output.error ?? "", 200) : undefined;
-			emitNodeNotice(
-				ctx,
-				output.state === "completed"
-					? "completed"
-					: output.state === "failed"
-						? "failed"
-						: "skipped",
-				nodeId,
-				detail,
-			);
-		}
-
-		switch (result.finalStatus) {
-			case "completed":
-				ctx.ui.notify(formatRunComplete(result.runId, result.durationMs), "info");
-				break;
-			case "cancelled":
-				ctx.ui.notify(
-					formatRunCancelled(result.runId, result.cancelReason ?? "unknown reason"),
-					"warning",
-				);
-				break;
-			case "failed": {
-				const summary = result.failedNodes.join(", ") || "see node outputs";
-				ctx.ui.notify(formatRunFailed(result.runId, summary), "error");
-				break;
-			}
-			default:
-				ctx.ui.notify(`Procedure run ended with status ${result.finalStatus}.`, "info");
-		}
+		emitProcedureReceipt(
+			ctx,
+			formatProcedureReceipt({
+				workflow: found.workflow,
+				runId: result.runId,
+				finalStatus: result.finalStatus,
+				durationMs: result.durationMs,
+				nodeOutputs: result.nodeOutputs,
+				cancelReason: result.cancelReason,
+			}),
+		);
 	} finally {
 		stopPanel();
 	}
-}
-
-function truncate(s: string, max: number): string {
-	if (s.length <= max) return s;
-	return `${s.slice(0, max - 1)}…`;
 }

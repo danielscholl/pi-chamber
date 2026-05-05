@@ -35,6 +35,7 @@ import * as fs from "node:fs";
 // @ts-ignore
 import * as path from "node:path";
 
+import { parse as parseYamlString } from "yaml";
 import { z } from "zod";
 import {
 	BASH_NODE_AI_FIELDS,
@@ -108,12 +109,8 @@ const PI_IGNORED_FIELDS_WORKFLOW: readonly string[] = [
 // YAML parse + raw shape utilities
 // ---------------------------------------------------------------------------
 
-declare const Bun: {
-	YAML: { parse: (content: string) => unknown };
-};
-
 function parseYaml(content: string): unknown {
-	return Bun.YAML.parse(content);
+	return parseYamlString(content);
 }
 
 function formatNodeIssue(id: string, issue: z.ZodIssue): string {

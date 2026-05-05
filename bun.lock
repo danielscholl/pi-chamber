@@ -6,6 +6,7 @@
       "name": "pi-chamber",
       "dependencies": {
         "typebox": "^1.1.24",
+        "yaml": "^2.8.0",
         "zod": "^3.25.28",
       },
       "devDependencies": {

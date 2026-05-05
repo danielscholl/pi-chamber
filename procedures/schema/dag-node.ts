@@ -16,10 +16,10 @@
  * so a flat schema with superRefine is cleaner than a z.union() with implicit discriminants.
  */
 import { z } from 'zod';
-import { stepRetryConfigSchema } from './retry';
-import { loopNodeConfigSchema } from './loop';
-import { workflowNodeHooksSchema } from './hooks';
-import { isValidCommandName } from './command-validation';
+import { stepRetryConfigSchema } from './retry.ts';
+import { loopNodeConfigSchema } from './loop.ts';
+import { workflowNodeHooksSchema } from './hooks.ts';
+import { isValidCommandName } from './command-validation.ts';
 
 // ---------------------------------------------------------------------------
 // TriggerRule

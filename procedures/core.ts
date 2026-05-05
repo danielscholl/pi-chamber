@@ -16,6 +16,9 @@ import * as os from "node:os";
 // biome-ignore lint/suspicious/noTsIgnore: Bun bundles Node built-ins at runtime.
 // @ts-ignore
 import * as path from "node:path";
+// biome-ignore lint/suspicious/noTsIgnore: Bun bundles Node built-ins at runtime.
+// @ts-ignore
+import { fileURLToPath } from "node:url";
 
 import {
 	discoverWorkflows,
@@ -57,7 +60,8 @@ export interface ResolvePathsOptions {
 export function resolveProceduresPaths(opts: ResolvePathsOptions): ProceduresPaths {
 	const home = opts.homeDir ?? os.homedir();
 	const bundled =
-		opts.bundledDir ?? path.join(import.meta.dir, "defaults");
+		opts.bundledDir ??
+		path.join(path.dirname(fileURLToPath(import.meta.url)), "defaults");
 	const rootDir = path.join(opts.cwd, ".pi", "procedures");
 	const runsDir = path.join(rootDir, "runs");
 

@@ -4,7 +4,11 @@ import { describe, expect, test } from "bun:test";
 
 import { parseWorkflow } from "./loader.ts";
 import type { WorkflowDefinition } from "./schema/index.ts";
-import { renderWorkflowDag } from "./ui.ts";
+import {
+	emitProcedureReceipt,
+	PROCEDURES_RECEIPT_WIDGET_KEY,
+	renderWorkflowDag,
+} from "./ui.ts";
 
 function makeWorkflow(yaml: string): WorkflowDefinition {
 	const result = parseWorkflow(yaml, "test.yaml");
@@ -69,5 +73,80 @@ nodes:
 		const dag = renderWorkflowDag(wf);
 		expect(dag).toContain("[bash]");
 		expect(dag).toContain("[cancel]");
+	});
+});
+
+describe("emitProcedureReceipt", () => {
+	test("UI path: posts a multi-line widget aboveEditor and clears on TTL", async () => {
+		const setWidgetCalls: Array<{
+			key: string;
+			content: string[] | undefined;
+			placement?: string;
+		}> = [];
+		const ctx = {
+			hasUI: true,
+			ui: {
+				notify: () => {
+					throw new Error("notify should not run when setWidget is available");
+				},
+				setWidget: (
+					key: string,
+					content: string[] | undefined,
+					options?: { placement?: "aboveEditor" | "belowEditor" },
+				) => {
+					setWidgetCalls.push({ key, content, placement: options?.placement });
+				},
+			},
+		};
+		emitProcedureReceipt(ctx, ["row 1", "row 2"]);
+		expect(setWidgetCalls).toHaveLength(1);
+		expect(setWidgetCalls[0]).toEqual({
+			key: PROCEDURES_RECEIPT_WIDGET_KEY,
+			content: ["row 1", "row 2"],
+			placement: "aboveEditor",
+		});
+
+		// Re-emitting clears the prior timer; the widget remains set to the new content.
+		emitProcedureReceipt(ctx, ["row 3"]);
+		expect(setWidgetCalls).toHaveLength(2);
+		expect(setWidgetCalls[1].content).toEqual(["row 3"]);
+	});
+
+	test("headless path (hasUI=false): joined receipt lands on stdout via shared notify", () => {
+		const captured: string[] = [];
+		const original = console.log;
+		console.log = (msg?: unknown) => {
+			captured.push(String(msg));
+		};
+		try {
+			emitProcedureReceipt(
+				{
+					hasUI: false,
+					ui: {
+						notify: () => {
+							throw new Error("ctx.ui.notify should not be called when hasUI=false");
+						},
+					},
+				},
+				["a", "b", "c"],
+			);
+		} finally {
+			console.log = original;
+		}
+		expect(captured).toEqual(["a\nb\nc"]);
+	});
+
+	test("UI without setWidget: also falls through to notify", () => {
+		const notifies: string[] = [];
+		const ctx = {
+			hasUI: true,
+			ui: {
+				notify: (message: string) => {
+					notifies.push(message);
+				},
+			},
+		};
+		emitProcedureReceipt(ctx, ["only"]);
+		expect(notifies).toEqual(["only"]);
 	});
 });

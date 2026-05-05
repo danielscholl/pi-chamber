@@ -14,6 +14,42 @@ import { notify, startWorkingPanel } from "../shared/notice.ts";
 import type { WorkflowDefinition } from "./schema/index.ts";
 
 export const PROCEDURES_PROGRESS_WIDGET_KEY = "procedures-progress";
+export const PROCEDURES_RECEIPT_WIDGET_KEY = "procedures-receipt";
+
+const RECEIPT_TTL_MS = 12_000;
+
+function createReceiptEmitter(ttlMs: number) {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	return function emit(ctx: NoticeContext, lines: readonly string[]): void {
+		if (!ctx.hasUI || !ctx.ui.setWidget) {
+			notify(ctx, lines.join("\n"), "info");
+			return;
+		}
+		const setWidget = ctx.ui.setWidget;
+		if (timer) {
+			clearTimeout(timer);
+			timer = undefined;
+		}
+		setWidget(PROCEDURES_RECEIPT_WIDGET_KEY, [...lines], { placement: "aboveEditor" });
+		timer = setTimeout(() => {
+			timer = undefined;
+			try {
+				setWidget(PROCEDURES_RECEIPT_WIDGET_KEY, undefined);
+			} catch {
+				// ctx may be torn down by the time the timer fires
+			}
+		}, ttlMs);
+		timer.unref?.();
+	};
+}
+
+/**
+ * Post the post-run receipt as a transient widget anchored above the editor.
+ * Auto-clears after RECEIPT_TTL_MS so stale receipts don't pile up. Falls back
+ * to a single notify when no UI / setWidget is available (so headless runs
+ * still see the full summary).
+ */
+export const emitProcedureReceipt = createReceiptEmitter(RECEIPT_TTL_MS);
 
 const RUN_PHRASES = [
 	"queueing nodes",
@@ -76,19 +112,3 @@ function nodeKind(
 	return "?";
 }
 
-/**
- * Emit a one-line notify when a node transitions. The slash-command surface
- * wires this in as the executor's onDelta / event-mirror channel.
- */
-export function emitNodeNotice(
-	ctx: NoticeContext,
-	kind: "started" | "completed" | "failed" | "skipped",
-	nodeId: string,
-	detail?: string,
-): void {
-	if (!ctx.hasUI) return;
-	const symbol =
-		kind === "started" ? "→" : kind === "completed" ? "✓" : kind === "failed" ? "✗" : "·";
-	const line = `${symbol} ${nodeId}${detail ? `  ${detail}` : ""}`;
-	notify(ctx, line, kind === "failed" ? "warning" : "info");
-}

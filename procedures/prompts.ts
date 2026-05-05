@@ -5,7 +5,13 @@
 
 import type { WorkflowLoadWarning } from "./loader.ts";
 import type { RunSummary } from "./store.ts";
-import type { WorkflowSource, WorkflowWithSource } from "./schema/index.ts";
+import type {
+	NodeOutput,
+	WorkflowDefinition,
+	WorkflowRunStatus,
+	WorkflowSource,
+	WorkflowWithSource,
+} from "./schema/index.ts";
 
 const SOURCE_LABEL: Record<WorkflowSource, string> = {
 	bundled: "bundled",
@@ -25,6 +31,39 @@ export function formatWorkflowList(workflows: readonly WorkflowWithSource[]): st
 		lines.push(`  - ${w.workflow.name}  [${SOURCE_LABEL[w.source]}]  ${w.workflow.description.split("\n")[0]}`);
 	}
 	return lines.join("\n");
+}
+
+export const PROCEDURE_OPTION_PREFIX = "▸";
+
+const PROCEDURE_OPTION_DESC_LIMIT = 60;
+
+/**
+ * Compact one-liner for a workflow used in `/procedures` interactive picker
+ * rows. Mirrors the `▸ slug · meta · detail` shape `/room` uses for saved-room
+ * options so the two pickers feel like the same UI.
+ */
+export function formatProcedureOption(w: WorkflowWithSource): string {
+	const firstLine = w.workflow.description.split("\n")[0]?.trim() ?? "";
+	const desc =
+		firstLine.length > PROCEDURE_OPTION_DESC_LIMIT
+			? `${firstLine.slice(0, PROCEDURE_OPTION_DESC_LIMIT - 1)}…`
+			: firstLine;
+	const tail = desc ? ` · ${desc}` : "";
+	return `${PROCEDURE_OPTION_PREFIX} ${w.workflow.name} · ${SOURCE_LABEL[w.source]}${tail}`;
+}
+
+/**
+ * Map a picker selection back to a workflow name. Returns undefined if the
+ * choice doesn't match any known procedure (e.g. a synthetic entry).
+ */
+export function parseProcedureChoice(
+	choice: string,
+	workflows: readonly WorkflowWithSource[],
+): string | undefined {
+	const match = choice.match(/^▸\s+(\S+)\s/);
+	if (!match) return undefined;
+	const name = match[1];
+	return workflows.some((w) => w.workflow.name === name) ? name : undefined;
 }
 
 export function formatRunStatus(summaries: readonly RunSummary[]): string {
@@ -67,15 +106,78 @@ export function formatHaltConfirmation(runId: string): string {
 	return `Halt requested for run ${runId}.`;
 }
 
-export function formatRunComplete(runId: string, durationMs: number): string {
-	const seconds = (durationMs / 1000).toFixed(1);
-	return `Procedure run ${runId} completed in ${seconds}s.`;
+// ---------------------------------------------------------------------------
+// Receipt — the multi-line summary widget shown after a /procedures run
+// ---------------------------------------------------------------------------
+
+export interface ProcedureReceiptInput {
+	readonly workflow: WorkflowDefinition;
+	readonly runId: string;
+	readonly finalStatus: WorkflowRunStatus;
+	readonly durationMs: number;
+	readonly nodeOutputs: ReadonlyMap<string, NodeOutput>;
+	readonly cancelReason?: string;
 }
 
-export function formatRunFailed(runId: string, errorSummary: string): string {
-	return `Procedure run ${runId} failed: ${errorSummary}`;
+const RECEIPT_EXCERPT_LIMIT = 80;
+
+const RECEIPT_STATUS_ICON: Record<string, string> = {
+	completed: "✓",
+	failed: "✗",
+	cancelled: "⊘",
+};
+
+/**
+ * Render the post-run receipt as an array of lines. Layout:
+ *
+ *   ✓ <name> <status> in <Ns> · run <runId>
+ *     ✓ <id>[: <excerpt>]      ← prompt/command nodes excerpt their final text
+ *     ✗ <id>[: <reason>]
+ *     · <id> (skipped)
+ *     view: /procedures status <runId>
+ *
+ * Bash node output is intentionally omitted from the excerpt (can be huge,
+ * not human-readable). The user sees the full output via /procedures status
+ * or the per-node text under .pi/procedures/runs/<id>/nodes/.
+ */
+export function formatProcedureReceipt(input: ProcedureReceiptInput): string[] {
+	const seconds = (input.durationMs / 1000).toFixed(1);
+	const headerIcon = RECEIPT_STATUS_ICON[input.finalStatus] ?? "·";
+	const lines: string[] = [
+		`${headerIcon} ${input.workflow.name} ${input.finalStatus} in ${seconds}s · run ${input.runId}`,
+	];
+	if (input.cancelReason) {
+		lines.push(`  cancel: ${input.cancelReason}`);
+	}
+
+	const kindOf = new Map<string, "prompt" | "command" | "bash" | "other">();
+	for (const node of input.workflow.nodes) {
+		if ("prompt" in node && typeof node.prompt === "string") kindOf.set(node.id, "prompt");
+		else if ("command" in node && typeof node.command === "string") kindOf.set(node.id, "command");
+		else if ("bash" in node && typeof node.bash === "string") kindOf.set(node.id, "bash");
+		else kindOf.set(node.id, "other");
+	}
+
+	for (const [nodeId, output] of input.nodeOutputs) {
+		const kind = kindOf.get(nodeId) ?? "other";
+		if (output.state === "completed") {
+			const excerpt =
+				kind === "prompt" || kind === "command" ? excerptForReceipt(output.output) : "";
+			lines.push(excerpt ? `  ✓ ${nodeId}: ${excerpt}` : `  ✓ ${nodeId}`);
+		} else if (output.state === "failed") {
+			const reason = output.error ? excerptForReceipt(output.error) : "";
+			lines.push(reason ? `  ✗ ${nodeId}: ${reason}` : `  ✗ ${nodeId}`);
+		} else if (output.state === "skipped") {
+			lines.push(`  · ${nodeId} (skipped)`);
+		}
+	}
+
+	lines.push(`  view: /procedures status ${input.runId}`);
+	return lines;
 }
 
-export function formatRunCancelled(runId: string, reason: string): string {
-	return `Procedure run ${runId} cancelled: ${reason}`;
+function excerptForReceipt(s: string): string {
+	const single = s.replace(/\s+/g, " ").trim();
+	if (single.length <= RECEIPT_EXCERPT_LIMIT) return single;
+	return `${single.slice(0, RECEIPT_EXCERPT_LIMIT - 1)}…`;
 }

@@ -11,7 +11,7 @@ import {
   effortLevelSchema,
   thinkingConfigSchema,
   sandboxSettingsSchema,
-} from './dag-node';
+} from './dag-node.ts';
 
 // ---------------------------------------------------------------------------
 // Shared enum schemas
