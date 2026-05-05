@@ -186,7 +186,7 @@ describe("validateLensManifest", () => {
 	});
 
 	test("only the documented v1 lens kinds are allowed", () => {
-		expect(ALLOWED_LENS_KINDS).toEqual(["briefing", "status-board"]);
+		expect(ALLOWED_LENS_KINDS).toEqual(["briefing", "status-board", "dag-run"]);
 	});
 });
 

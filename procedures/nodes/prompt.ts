@@ -49,6 +49,7 @@ export const promptHandler: NodeHandler<PromptNode> = async ({
 			output: result.finalText,
 			error: `aborted (signal): ${(result.errorMessage ?? result.stderr).slice(0, 500)}`.trim(),
 			...(result.sessionId ? { sessionId: result.sessionId } : {}),
+			...(result.usage ? { usage: result.usage } : {}),
 		};
 		return output;
 	}
@@ -61,6 +62,7 @@ export const promptHandler: NodeHandler<PromptNode> = async ({
 				(result.stopReason ? `, stopReason ${result.stopReason}` : "") +
 				`): ${(result.errorMessage ?? result.stderr).slice(0, 1000)}`.trim(),
 			...(result.sessionId ? { sessionId: result.sessionId } : {}),
+			...(result.usage ? { usage: result.usage } : {}),
 		};
 		return output;
 	}
@@ -69,6 +71,7 @@ export const promptHandler: NodeHandler<PromptNode> = async ({
 		state: "completed",
 		output: result.finalText,
 		...(result.sessionId ? { sessionId: result.sessionId } : {}),
+		...(result.usage ? { usage: result.usage } : {}),
 	};
 	return output;
 };

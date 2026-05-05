@@ -63,6 +63,7 @@ export const commandHandler: NodeHandler<CommandNode> = async ({
 			output: result.finalText,
 			error: `aborted (signal): ${(result.errorMessage ?? result.stderr).slice(0, 500)}`.trim(),
 			...(result.sessionId ? { sessionId: result.sessionId } : {}),
+			...(result.usage ? { usage: result.usage } : {}),
 		};
 		return output;
 	}
@@ -75,6 +76,7 @@ export const commandHandler: NodeHandler<CommandNode> = async ({
 				(result.stopReason ? `, stopReason ${result.stopReason}` : "") +
 				`): ${(result.errorMessage ?? result.stderr).slice(0, 1000)}`.trim(),
 			...(result.sessionId ? { sessionId: result.sessionId } : {}),
+			...(result.usage ? { usage: result.usage } : {}),
 		};
 		return output;
 	}
@@ -83,6 +85,7 @@ export const commandHandler: NodeHandler<CommandNode> = async ({
 		state: "completed",
 		output: result.finalText,
 		...(result.sessionId ? { sessionId: result.sessionId } : {}),
+		...(result.usage ? { usage: result.usage } : {}),
 	};
 	return output;
 };

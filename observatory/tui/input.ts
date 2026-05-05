@@ -3,6 +3,8 @@ import {
 	clearAllLensData,
 	clearNotification,
 	invalidateLensData,
+	popDrill,
+	pushDrill,
 	setMode,
 	setSelectedIndex,
 } from "./state.ts";
@@ -58,6 +60,12 @@ export function handleObservatoryInput(
 
 	if (data === ESC || data === "h" || data === "\x1b[D") {
 		if (isDetail) {
+			// Pop body-local drill first (dag-run lens). Only fall back to
+			// list mode once the stack is empty.
+			if (popDrill(state)) {
+				ctx.requestRender();
+				return { consumed: true };
+			}
 			setMode(state, "list");
 			ctx.requestRender();
 			return { consumed: true };
@@ -127,6 +135,34 @@ export function handleObservatoryInput(
 
 	if (isDetail) {
 		const half = Math.max(1, Math.floor(ctx.viewportHeight() / 2));
+		// Body-local row navigation overrides scroll-by-line when the renderer
+		// has advertised a list (dag-run lens history + run-detail pages).
+		if (state.bodyNav.kind === "list" && state.bodyNav.ids.length > 0) {
+			const ids = state.bodyNav.ids;
+			if (data === "j" || data === "\x1b[B") {
+				state.bodySelectedIndex = Math.min(
+					ids.length - 1,
+					state.bodySelectedIndex + 1,
+				);
+				state.pendingG = false;
+				ctx.requestRender();
+				return { consumed: true };
+			}
+			if (data === "k" || data === "\x1b[A") {
+				state.bodySelectedIndex = Math.max(0, state.bodySelectedIndex - 1);
+				state.pendingG = false;
+				ctx.requestRender();
+				return { consumed: true };
+			}
+			if (ENTER_VARIANTS.has(data) || data === "l" || data === "\x1b[C") {
+				const id = ids[state.bodySelectedIndex];
+				if (id !== undefined) {
+					pushDrill(state, { kind: state.bodyNav.pushKind, id });
+					ctx.requestRender();
+				}
+				return { consumed: true };
+			}
+		}
 		if (data === "j" || data === "\x1b[B") {
 			state.bodyScrollOffset = clampScroll(
 				state.bodyScrollOffset + 1,

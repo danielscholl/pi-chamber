@@ -14,22 +14,79 @@ function entry(id: string, kind: "briefing" | "status-board" = "briefing"): Disc
 }
 
 describe("renderDashboard", () => {
-	test("includes all four panel headers", () => {
+	test("includes all five panel headers", () => {
 		const out = renderDashboard(
 			{
 				entries: [],
 				roomData: null,
+				proceduresData: null,
 				minds: [],
 				activity: null,
 				now: Date.now(),
 			},
-			60,
+			120,
 		);
 		const text = out.join("\n");
 		expect(text).toContain("Lenses");
 		expect(text).toContain("Room");
+		expect(text).toContain("Procedures");
 		expect(text).toContain("Minds");
 		expect(text).toContain("Activity");
+	});
+
+	test("Procedures panel falls back to a hint when no runs are present", () => {
+		const out = renderDashboard(
+			{
+				entries: [],
+				roomData: null,
+				proceduresData: null,
+				minds: [],
+				activity: null,
+				now: Date.now(),
+			},
+			120,
+		);
+		expect(out.join("\n")).toContain("no runs yet");
+	});
+
+	test("Procedures panel summarises last 3 runs from the lens data", () => {
+		const now = Date.now();
+		const out = renderDashboard(
+			{
+				entries: [],
+				roomData: null,
+				proceduresData: {
+					generatedAt: new Date(now).toISOString(),
+					runs: [
+						{
+							runId: "r1",
+							workflowName: "demo",
+							status: "completed",
+							startedAt: new Date(now - 30_000).toISOString(),
+							durationMs: 4100,
+						},
+						{
+							runId: "r2",
+							workflowName: "smoke",
+							status: "failed",
+							startedAt: new Date(now - 5 * 60_000).toISOString(),
+							durationMs: 1200,
+						},
+					],
+					current: null,
+				},
+				minds: [],
+				activity: null,
+				now,
+			},
+			200,
+		);
+		const text = out.join("\n");
+		expect(text).toContain("2 recent runs");
+		expect(text).toContain("demo");
+		expect(text).toContain("smoke");
+		expect(text).toContain("✓");
+		expect(text).toContain("✗");
 	});
 
 	test("Lenses panel shows ok and invalid counts", () => {
@@ -41,6 +98,7 @@ describe("renderDashboard", () => {
 					{ id: "broken", status: "invalid", reason: "missing lens.json" },
 				],
 				roomData: null,
+				proceduresData: null,
 				minds: [],
 				activity: null,
 				now: Date.now(),
@@ -61,6 +119,7 @@ describe("renderDashboard", () => {
 					{ name: "moneypenny", status: "thinking" },
 					{ name: "scribe", status: "ready" },
 				],
+				proceduresData: null,
 				minds: [],
 				activity: null,
 				now,
@@ -78,6 +137,7 @@ describe("renderDashboard", () => {
 			{
 				entries: [],
 				roomData: null,
+				proceduresData: null,
 				minds: [],
 				activity: null,
 				now: Date.now(),
@@ -92,6 +152,7 @@ describe("renderDashboard", () => {
 			{
 				entries: [],
 				roomData: null,
+				proceduresData: null,
 				minds: ["scribe", "ops", "moneypenny"],
 				activity: null,
 				now: Date.now(),
@@ -110,6 +171,7 @@ describe("renderDashboard", () => {
 			{
 				entries: [],
 				roomData: null,
+				proceduresData: null,
 				minds: [],
 				activity: { lensId: "room", mtimeMs: now - 4 * 60_000 },
 				now,
@@ -126,6 +188,7 @@ describe("renderDashboard", () => {
 			{
 				entries: [entry("ops")],
 				roomData: null,
+				proceduresData: null,
 				minds: ["a", "b", "c", "d"],
 				activity: null,
 				now: Date.now(),

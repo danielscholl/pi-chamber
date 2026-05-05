@@ -3,12 +3,15 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+	accumulateUsage,
 	composeSpawnArgs,
 	extractDelta,
 	extractFinalText,
 	parseNdjsonLine,
 	type AssistantMessage,
+	type AssistantUsage,
 	type NdjsonEvent,
+	type SpawnUsage,
 } from "./spawn.ts";
 
 describe("composeSpawnArgs", () => {
@@ -152,5 +155,100 @@ describe("extractDelta", () => {
 
 	test("returns null for non-message_update events", () => {
 		expect(extractDelta({ type: "session" } as NdjsonEvent)).toBeNull();
+	});
+});
+
+describe("accumulateUsage", () => {
+	test("returns prev unchanged when next is undefined", () => {
+		const prev: SpawnUsage = {
+			input: 10,
+			output: 5,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 15,
+			costUsd: 0.001,
+		};
+		expect(accumulateUsage(prev, undefined)).toBe(prev);
+	});
+
+	test("returns undefined when both prev and next are undefined", () => {
+		expect(accumulateUsage(undefined, undefined)).toBeUndefined();
+	});
+
+	test("seeds a fresh accumulator from the first usage payload", () => {
+		const next: AssistantUsage = {
+			input: 100,
+			output: 50,
+			cacheRead: 200,
+			cacheWrite: 10,
+			totalTokens: 360,
+			cost: { input: 0.001, output: 0.002, cacheRead: 0, cacheWrite: 0, total: 0.003 },
+		};
+		expect(accumulateUsage(undefined, next)).toEqual({
+			input: 100,
+			output: 50,
+			cacheRead: 200,
+			cacheWrite: 10,
+			totalTokens: 360,
+			costUsd: 0.003,
+		});
+	});
+
+	test("sums token counts and cost across multiple usage payloads", () => {
+		const first: AssistantUsage = {
+			input: 100,
+			output: 50,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 150,
+			cost: { total: 0.001 },
+		};
+		const second: AssistantUsage = {
+			input: 80,
+			output: 40,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 120,
+			cost: { total: 0.0008 },
+		};
+		const acc = accumulateUsage(undefined, first);
+		const final = accumulateUsage(acc, second);
+		expect(final).toEqual({
+			input: 180,
+			output: 90,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 270,
+			costUsd: 0.0018,
+		});
+	});
+
+	test("treats missing fields as zero contributions (defensive)", () => {
+		const partial: AssistantUsage = { input: 10 };
+		expect(accumulateUsage(undefined, partial)).toEqual({
+			input: 10,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			costUsd: 0,
+		});
+	});
+
+	test("threads through an AssistantMessage shape unchanged", () => {
+		const msg: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "hi" }],
+			stopReason: "stop",
+			usage: { input: 5, output: 3, cacheRead: 0, cacheWrite: 0, totalTokens: 8 },
+		};
+		expect(accumulateUsage(undefined, msg.usage)).toEqual({
+			input: 5,
+			output: 3,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 8,
+			costUsd: 0,
+		});
 	});
 });

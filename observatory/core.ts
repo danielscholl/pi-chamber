@@ -18,7 +18,7 @@ import {
 	resolveProjectRelativePath,
 } from "../genesis/core.ts";
 
-export const ALLOWED_LENS_KINDS = ["briefing", "status-board"] as const;
+export const ALLOWED_LENS_KINDS = ["briefing", "status-board", "dag-run"] as const;
 export type LensKind = (typeof ALLOWED_LENS_KINDS)[number];
 
 export const LENS_MANIFEST_FILE = "lens.json";

@@ -5,9 +5,13 @@ import type { DiscoveryEntry } from "../core.ts";
 import {
 	clearNotification,
 	createObservatoryViewState,
+	currentDrill,
 	invalidateLensData,
 	notificationIsExpired,
+	popDrill,
+	pushDrill,
 	selectionForIndex,
+	setBodyNav,
 	setEntries,
 	setLensData,
 	setMode,
@@ -187,5 +191,61 @@ describe("lens data cache", () => {
 		expect(state.lensDataCache.get("ops")).toEqual({ ok: true, data: { x: 1 } });
 		invalidateLensData(state, "ops");
 		expect(state.lensDataCache.has("ops")).toBe(false);
+	});
+});
+
+describe("body drill stack", () => {
+	test("starts empty with no body nav", () => {
+		const state = createObservatoryViewState();
+		expect(state.drillStack).toEqual([]);
+		expect(state.bodyNav).toEqual({ kind: "none" });
+		expect(state.bodySelectedIndex).toBe(0);
+		expect(currentDrill(state)).toBeNull();
+	});
+
+	test("pushDrill / popDrill mutate the stack and clear per-page selection", () => {
+		const state = createObservatoryViewState();
+		state.bodySelectedIndex = 5;
+		state.bodyScrollOffset = 12;
+		pushDrill(state, { kind: "run", id: "run-1" });
+		expect(state.drillStack).toEqual([{ kind: "run", id: "run-1" }]);
+		expect(state.bodySelectedIndex).toBe(0);
+		expect(state.bodyScrollOffset).toBe(0);
+		expect(currentDrill(state)).toEqual({ kind: "run", id: "run-1" });
+
+		pushDrill(state, { kind: "node", id: "summarize" });
+		expect(state.drillStack.length).toBe(2);
+		expect(currentDrill(state)).toEqual({ kind: "node", id: "summarize" });
+
+		expect(popDrill(state)).toBe(true);
+		expect(state.drillStack.length).toBe(1);
+		expect(popDrill(state)).toBe(true);
+		expect(state.drillStack.length).toBe(0);
+		expect(popDrill(state)).toBe(false); // empty pop reports false
+	});
+
+	test("setSelectedIndex resets the drill stack when changing lens", () => {
+		const state = createObservatoryViewState([manifestEntry("ops")]);
+		// items[2] = ops (lens-ok)
+		setSelectedIndex(state, 2);
+		pushDrill(state, { kind: "run", id: "run-1" });
+		expect(state.drillStack.length).toBe(1);
+		// Switch back to dashboard.
+		setSelectedIndex(state, 1);
+		expect(state.drillStack).toEqual([]);
+		expect(state.bodyNav).toEqual({ kind: "none" });
+	});
+
+	test("setBodyNav clamps bodySelectedIndex to the new list size", () => {
+		const state = createObservatoryViewState();
+		state.bodySelectedIndex = 9;
+		setBodyNav(state, { kind: "list", ids: ["a", "b"], pushKind: "run" });
+		expect(state.bodySelectedIndex).toBe(1);
+
+		setBodyNav(state, { kind: "list", ids: [], pushKind: "run" });
+		expect(state.bodySelectedIndex).toBe(0);
+
+		setBodyNav(state, { kind: "none" });
+		expect(state.bodyNav).toEqual({ kind: "none" });
 	});
 });

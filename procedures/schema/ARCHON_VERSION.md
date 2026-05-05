@@ -30,6 +30,16 @@ The vendored files differ from upstream in only these respects:
    makes future re-syncs a clean text diff. All other pi-chamber-authored
    files in `procedures/` use tabs per repo convention.
 
+3. **`NodeOutput` carries pi-chamber-only runtime extras.** `workflow-run.ts`
+   adds optional `usage` (token cost, see `tokenUsageSchema`), `startedAt`,
+   `completedAt`, and `durationMs` fields to the `completed`/`running` and
+   `failed` branches of `nodeOutputSchema`. The fields are additive and
+   Archon's parser strips unknown keys, so a serialized NodeOutput is still
+   bidirectionally portable (the extras are dropped on the Archon side).
+   These power the procedures observatory lens. Re-sync impact: when diffing
+   against upstream, expect the discriminated-union arms to be wider than
+   Archon's; preserve the pi-chamber additions.
+
 ## Sync procedure
 
 To re-sync against a newer Archon:

@@ -9,6 +9,7 @@ export type { DashboardActivity };
 export interface DashboardData {
 	entries: DiscoveryEntry[];
 	roomData: unknown;
+	proceduresData: unknown;
 	minds: string[];
 	activity: DashboardActivity | null;
 	now: number;
@@ -37,6 +38,13 @@ export function renderDashboard(
 			}),
 		(colWidth: number) =>
 			panel({
+				title: "Procedures",
+				body: proceduresPanel(data.proceduresData, data.now),
+				width: colWidth,
+				colorize,
+			}),
+		(colWidth: number) =>
+			panel({
 				title: "Minds",
 				// inner width = colWidth - 2 (left + right border).
 				body: mindsPanel(data.minds, Math.max(10, colWidth - 2)),
@@ -51,7 +59,7 @@ export function renderDashboard(
 				colorize,
 			}),
 	];
-	return grid({ cells, width: w, minColWidth: 24, gap: 2 });
+	return grid({ cells, width: w, minColWidth: 22, gap: 2 });
 }
 
 function lensesPanel(entries: DiscoveryEntry[]): string[] {
@@ -123,6 +131,67 @@ function activityPanel(
 ): string[] {
 	if (!activity) return ["No lens writes yet."];
 	return [`Last write: ${formatRelativeTime(now - activity.mtimeMs)} (${activity.lensId})`];
+}
+
+interface ProceduresPanelRunRow {
+	runId?: unknown;
+	workflowName?: unknown;
+	status?: unknown;
+	startedAt?: unknown;
+	durationMs?: unknown;
+}
+
+/**
+ * Surface the most-recent 3 procedure runs from the procedures lens data.
+ * Tolerates a missing or malformed payload — the lens may not exist yet.
+ */
+function proceduresPanel(data: unknown, now: number): string[] {
+	const runs = extractProcedureRuns(data);
+	if (runs.length === 0) {
+		return ["(no runs yet — try /procedures run hello-world)"];
+	}
+	const lines: string[] = [];
+	lines.push(`${runs.length} recent run${runs.length === 1 ? "" : "s"}`);
+	for (const run of runs.slice(0, 3)) {
+		const glyph = procStatusGlyph(typeof run.status === "string" ? run.status : "");
+		const name =
+			typeof run.workflowName === "string" ? run.workflowName : "(unknown)";
+		const ageMs =
+			typeof run.startedAt === "string"
+				? Math.max(0, now - new Date(run.startedAt).getTime())
+				: null;
+		const age = ageMs !== null ? formatRelativeTime(ageMs) : "—";
+		const durationLabel =
+			typeof run.durationMs === "number"
+				? `${(run.durationMs / 1000).toFixed(1)}s`
+				: "";
+		lines.push(`  ${glyph} ${name} · ${age}${durationLabel ? ` · ${durationLabel}` : ""}`);
+	}
+	return lines;
+}
+
+function extractProcedureRuns(data: unknown): ProceduresPanelRunRow[] {
+	if (!data || typeof data !== "object") return [];
+	const obj = data as { runs?: unknown };
+	if (!Array.isArray(obj.runs)) return [];
+	return obj.runs.filter(
+		(r): r is ProceduresPanelRunRow => r !== null && typeof r === "object",
+	);
+}
+
+function procStatusGlyph(status: string): string {
+	switch (status) {
+		case "completed":
+			return "✓";
+		case "running":
+			return "◐";
+		case "failed":
+			return "✗";
+		case "cancelled":
+			return "⊘";
+		default:
+			return "○";
+	}
 }
 
 export function formatRelativeTime(deltaMs: number): string {

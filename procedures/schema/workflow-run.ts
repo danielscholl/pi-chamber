@@ -4,10 +4,17 @@
  *
  * Zod schemas for workflow run state types.
  *
- * Adaptation: pi-chamber stores run state on disk (not in a database), so
- * `conversation_id`, `parent_conversation_id`, and `codebase_id` are optional
- * here whereas Archon requires them. Field names and shapes are otherwise
- * identical so a serialized WorkflowRun is bidirectionally portable.
+ * Adaptations:
+ *  - pi-chamber stores run state on disk (not in a database), so
+ *    `conversation_id`, `parent_conversation_id`, and `codebase_id` are
+ *    optional here whereas Archon requires them.
+ *  - NodeOutput carries optional pi-chamber-only runtime fields (`usage`,
+ *    `startedAt`, `completedAt`, `durationMs`). Additive — Archon's parser
+ *    strips unknown keys, so a serialized NodeOutput is still bidirectionally
+ *    portable (the extras are dropped on the Archon side).
+ *
+ * Field names and shapes are otherwise identical so a serialized WorkflowRun
+ * is bidirectionally portable.
  */
 import { z } from 'zod';
 
@@ -62,6 +69,29 @@ export const nodeStateSchema = z.enum(['pending', 'running', 'completed', 'faile
 export type NodeState = z.infer<typeof nodeStateSchema>;
 
 // ---------------------------------------------------------------------------
+// TokenUsage (pi-chamber addition)
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-node token usage, harvested from the spawned child pi's `message_end`
+ * events (sum across all assistant turns). All fields optional so providers
+ * without pricing still validate and old on-disk runs that pre-date a field
+ * round-trip cleanly.
+ */
+export const tokenUsageSchema = z
+  .object({
+    input: z.number(),
+    output: z.number(),
+    cacheRead: z.number(),
+    cacheWrite: z.number(),
+    totalTokens: z.number(),
+    costUsd: z.number(),
+  })
+  .partial();
+
+export type TokenUsage = z.infer<typeof tokenUsageSchema>;
+
+// ---------------------------------------------------------------------------
 // NodeOutput
 // ---------------------------------------------------------------------------
 
@@ -70,18 +100,29 @@ export type NodeState = z.infer<typeof nodeStateSchema>;
  * `output` is the concatenated assistant text (or JSON-encoded string when
  * output_format is set). Empty string for failed/skipped nodes.
  * `error` is required when state is 'failed', absent on all other states.
+ *
+ * `usage` / `startedAt` / `completedAt` / `durationMs` are pi-chamber-only
+ * runtime extras (see file header). All optional and additive.
  */
 export const nodeOutputSchema = z.discriminatedUnion('state', [
   z.object({
     state: z.enum(['completed', 'running']),
     output: z.string(),
     sessionId: z.string().optional(),
+    usage: tokenUsageSchema.optional(),
+    startedAt: z.string().optional(),
+    completedAt: z.string().optional(),
+    durationMs: z.number().optional(),
   }),
   z.object({
     state: z.literal('failed'),
     output: z.string(),
     sessionId: z.string().optional(),
     error: z.string(),
+    usage: tokenUsageSchema.optional(),
+    startedAt: z.string().optional(),
+    completedAt: z.string().optional(),
+    durationMs: z.number().optional(),
   }),
   z.object({
     state: z.enum(['pending', 'skipped']),

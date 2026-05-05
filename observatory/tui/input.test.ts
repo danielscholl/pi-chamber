@@ -4,6 +4,7 @@ import { describe, expect, test } from "bun:test";
 import type { DiscoveryEntry } from "../core.ts";
 import { handleObservatoryInput, type ObservatoryInputContext } from "./input.ts";
 import {
+	type BodyNavState,
 	createObservatoryViewState,
 	setLensData,
 	setMode,
@@ -230,5 +231,74 @@ describe("notification dismissal", () => {
 		const ctx = makeCtx();
 		handleObservatoryInput(state, "j", ctx);
 		expect(state.notification).toBeNull();
+	});
+});
+
+describe("dag-run drill navigation", () => {
+	test("Enter pushes a drill frame using bodyNav.ids[bodySelectedIndex]", () => {
+		const state = createObservatoryViewState();
+		setMode(state, "detail");
+		const nav: BodyNavState = {
+			kind: "list",
+			ids: ["run-1", "run-2", "run-3"],
+			pushKind: "run",
+		};
+		state.bodyNav = nav;
+		state.bodySelectedIndex = 1;
+		const ctx = makeCtx();
+		handleObservatoryInput(state, "\r", ctx);
+		expect(state.drillStack).toEqual([{ kind: "run", id: "run-2" }]);
+		// Pushing a frame clears the bodyNav and selection so the renderer can
+		// re-advertise for the new page.
+		expect(state.bodyNav as BodyNavState).toEqual({ kind: "none" });
+		expect(state.bodySelectedIndex).toBe(0);
+	});
+
+	test("j/k cycles bodySelectedIndex within bodyNav.ids when in list mode", () => {
+		const state = createObservatoryViewState();
+		setMode(state, "detail");
+		const nav: BodyNavState = {
+			kind: "list",
+			ids: ["a", "b", "c"],
+			pushKind: "node",
+		};
+		state.bodyNav = nav;
+		const ctx = makeCtx();
+		handleObservatoryInput(state, "j", ctx);
+		expect(state.bodySelectedIndex).toBe(1);
+		handleObservatoryInput(state, "j", ctx);
+		expect(state.bodySelectedIndex).toBe(2);
+		// Clamps at the bottom.
+		handleObservatoryInput(state, "j", ctx);
+		expect(state.bodySelectedIndex).toBe(2);
+		handleObservatoryInput(state, "k", ctx);
+		expect(state.bodySelectedIndex).toBe(1);
+	});
+
+	test("Esc pops the drill stack before falling back to list mode", () => {
+		const state = createObservatoryViewState();
+		setMode(state, "detail");
+		state.drillStack = [
+			{ kind: "run", id: "run-1" },
+			{ kind: "node", id: "summarize" },
+		];
+		const ctx = makeCtx();
+		handleObservatoryInput(state, "\x1b", ctx); // Esc → pop node frame
+		expect(state.mode).toBe("detail");
+		expect(state.drillStack).toEqual([{ kind: "run", id: "run-1" }]);
+		handleObservatoryInput(state, "\x1b", ctx); // Esc → pop run frame
+		expect(state.mode).toBe("detail");
+		expect(state.drillStack).toEqual([]);
+		handleObservatoryInput(state, "\x1b", ctx); // Esc → fall back to list mode
+		expect(state.mode).toBe("list");
+	});
+
+	test("j/k falls through to scroll when bodyNav is none", () => {
+		const state = createObservatoryViewState();
+		setMode(state, "detail");
+		state.bodyNav = { kind: "none" };
+		const ctx = makeCtx({ contentLines: 100, viewport: 20 });
+		handleObservatoryInput(state, "j", ctx);
+		expect(state.bodyScrollOffset).toBe(1);
 	});
 });

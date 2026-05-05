@@ -59,11 +59,33 @@ export type NdjsonEvent =
 	| { type: "agent_end"; [k: string]: unknown }
 	| { type: string; [k: string]: unknown };
 
+/**
+ * Subset of pi-ai's `Usage` shape we consume. Mirrors the relevant fields from
+ * `@mariozechner/pi-ai` types.d.ts; we keep the cost nested as the upstream
+ * does. All numeric, all required upstream — declared optional here only for
+ * defensive parsing of unexpected payloads.
+ */
+export interface AssistantUsage {
+	input?: number;
+	output?: number;
+	cacheRead?: number;
+	cacheWrite?: number;
+	totalTokens?: number;
+	cost?: {
+		input?: number;
+		output?: number;
+		cacheRead?: number;
+		cacheWrite?: number;
+		total?: number;
+	};
+}
+
 export interface AssistantMessage {
 	role?: string;
 	content?: Array<Record<string, unknown>>;
 	stopReason?: string;
 	errorMessage?: string;
+	usage?: AssistantUsage;
 }
 
 export function parseNdjsonLine(line: string): NdjsonEvent | null {
@@ -207,6 +229,21 @@ export interface SpawnPiOptions {
 	getPiInvocationImpl?: typeof getPiInvocation;
 }
 
+/**
+ * Flat per-spawn token usage, accumulated across every `message_end` event the
+ * child pi emits. Absent when the child reports no usage (e.g., aborted before
+ * first message_end). Field names match `procedures/schema/workflow-run.ts`
+ * `tokenUsageSchema` so the result threads straight into NodeOutput.usage.
+ */
+export interface SpawnUsage {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	totalTokens: number;
+	costUsd: number;
+}
+
 export interface SpawnPiResult {
 	exitCode: number;
 	finalText: string;
@@ -216,6 +253,35 @@ export interface SpawnPiResult {
 	stopReason?: string;
 	errorMessage?: string;
 	durationMs: number;
+	usage?: SpawnUsage;
+}
+
+/**
+ * Sum a single child `usage` payload into the running accumulator. Exported
+ * for unit testing. Treats every field as additive — multi-turn spawns get
+ * cumulative totals, including cost. Missing fields contribute 0.
+ */
+export function accumulateUsage(
+	prev: SpawnUsage | undefined,
+	next: AssistantUsage | undefined,
+): SpawnUsage | undefined {
+	if (!next) return prev;
+	const base: SpawnUsage = prev ?? {
+		input: 0,
+		output: 0,
+		cacheRead: 0,
+		cacheWrite: 0,
+		totalTokens: 0,
+		costUsd: 0,
+	};
+	return {
+		input: base.input + (next.input ?? 0),
+		output: base.output + (next.output ?? 0),
+		cacheRead: base.cacheRead + (next.cacheRead ?? 0),
+		cacheWrite: base.cacheWrite + (next.cacheWrite ?? 0),
+		totalTokens: base.totalTokens + (next.totalTokens ?? 0),
+		costUsd: base.costUsd + (next.cost?.total ?? 0),
+	};
 }
 
 /**
@@ -258,6 +324,7 @@ export async function spawnPiOnce(options: SpawnPiOptions): Promise<SpawnPiResul
 	let sessionId: string | undefined;
 	let stopReason: string | undefined;
 	let errorMessage: string | undefined;
+	let usageAccum: SpawnUsage | undefined;
 
 	const onAbort = () => {
 		aborted = true;
@@ -304,6 +371,11 @@ export async function spawnPiOnce(options: SpawnPiOptions): Promise<SpawnPiResul
 						messages.push(msg);
 						if (typeof msg.stopReason === "string") stopReason = msg.stopReason;
 						if (typeof msg.errorMessage === "string") errorMessage = msg.errorMessage;
+						// Accumulate usage across every message_end so multi-turn spawns
+						// produce cumulative totals. Missing usage payloads are ignored.
+						if (msg.usage && typeof msg.usage === "object") {
+							usageAccum = accumulateUsage(usageAccum, msg.usage);
+						}
 					}
 				}
 			}
@@ -339,5 +411,6 @@ export async function spawnPiOnce(options: SpawnPiOptions): Promise<SpawnPiResul
 		stopReason,
 		errorMessage,
 		durationMs: Date.now() - start,
+		...(usageAccum ? { usage: usageAccum } : {}),
 	};
 }

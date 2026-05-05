@@ -172,7 +172,7 @@ export function formatProcedureReceipt(input: ProcedureReceiptInput): string[] {
 		}
 	}
 
-	lines.push(`  view: /procedures status ${input.runId}`);
+	lines.push(`  view: /procedures status ${input.runId}  ·  /observatory → Procedures`);
 	return lines;
 }
 

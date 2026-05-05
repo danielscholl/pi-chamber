@@ -25,6 +25,32 @@ export type ObservatorySelection =
 
 export type ObservatoryMode = "list" | "detail" | "help";
 
+/**
+ * One frame in the body-local drill stack used by the dag-run lens to model
+ * history → run → node navigation. Empty stack = lens root view; a single
+ * frame = run-detail; two frames = node-detail. Other lenses ignore this.
+ */
+export interface BodyDrillFrame {
+	kind: "run" | "node";
+	id: string;
+}
+
+/**
+ * Body-local navigation contract the input handler uses to drive j/k + Enter.
+ * The component sets this based on what's currently rendered in the body.
+ *
+ *   { kind: "none" }   — body has no per-row selection (briefing, status-board,
+ *                        node-detail leaf). j/k falls through to scroll.
+ *   { kind: "list", ids, pushKind }
+ *                      — body has a selectable list (dag-run history rows or
+ *                        run-detail node rows). j/k cycles bodySelectedIndex
+ *                        in [0, ids.length); Enter pushes a drill frame
+ *                        `{ kind: pushKind, id: ids[bodySelectedIndex] }`.
+ */
+export type BodyNavState =
+	| { kind: "none" }
+	| { kind: "list"; ids: string[]; pushKind: BodyDrillFrame["kind"] };
+
 export interface ObservatoryNotification {
 	message: string;
 	type: "info" | "warning" | "error";
@@ -50,6 +76,15 @@ export interface ObservatoryViewState {
 	activityCache: TtlCache<DashboardActivity | null> | null;
 	mindsCache: TtlCache<string[]> | null;
 	lastRefreshAt: number;
+	/**
+	 * Body-local drill stack. Empty for non-drillable lenses. Owned by the
+	 * lens body; list/detail/help modes are unchanged. See BodyDrillFrame.
+	 */
+	drillStack: BodyDrillFrame[];
+	/** Index into bodyNav.ids when bodyNav.kind === "list". */
+	bodySelectedIndex: number;
+	/** Set by the renderer to advertise body-local selection semantics. */
+	bodyNav: BodyNavState;
 }
 
 export function createObservatoryViewState(
@@ -70,6 +105,9 @@ export function createObservatoryViewState(
 		activityCache: null,
 		mindsCache: null,
 		lastRefreshAt: Date.now(),
+		drillStack: [],
+		bodySelectedIndex: 0,
+		bodyNav: { kind: "none" },
 	};
 	setSidebarItems(state, buildSidebarItems(entries, [], []));
 	return state;
@@ -122,6 +160,7 @@ export function setSelectedIndex(
 	state.selectedSidebarIndex = found;
 	state.selection = selectionForIndex(state, found);
 	state.bodyScrollOffset = 0;
+	resetBodyDrill(state);
 }
 
 // Replaces sidebarItems with `items` and re-resolves selection by id so
@@ -130,14 +169,16 @@ export function setSidebarItems(
 	state: ObservatoryViewState,
 	items: SidebarItem[],
 ): void {
+	const previousLensId =
+		state.selection.kind === "lens" ? state.selection.lensId : null;
 	state.sidebarItems = items;
 	if (items.length === 0) {
 		state.selectedSidebarIndex = 0;
 		state.selection = { kind: "dashboard" };
+		resetBodyDrill(state);
 		return;
 	}
-	const preferredId =
-		state.selection.kind === "lens" ? state.selection.lensId : "__dashboard__";
+	const preferredId = previousLensId ?? "__dashboard__";
 	let foundIndex = -1;
 	for (let i = 0; i < items.length; i++) {
 		const it = items[i];
@@ -152,10 +193,18 @@ export function setSidebarItems(
 	if (foundIndex < 0) {
 		state.selectedSidebarIndex = 0;
 		state.selection = { kind: "dashboard" };
+		resetBodyDrill(state);
 		return;
 	}
 	state.selectedSidebarIndex = foundIndex;
-	state.selection = selectionForIndex(state, foundIndex);
+	const newSelection = selectionForIndex(state, foundIndex);
+	state.selection = newSelection;
+	// Only reset drill state if the selection actually changed lens — a no-op
+	// rebuild (discovery refresh) keeps the operator's drill context.
+	const newLensId = newSelection.kind === "lens" ? newSelection.lensId : null;
+	if (newLensId !== previousLensId) {
+		resetBodyDrill(state);
+	}
 }
 
 export function setEntries(
@@ -195,6 +244,57 @@ export function setMode(
 	state.mode = mode;
 	if (mode !== "detail") {
 		state.bodyScrollOffset = 0;
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Body drill helpers (used by dag-run lens; ignored by other lenses)
+// ---------------------------------------------------------------------------
+
+/** Push a frame onto the drill stack and reset the per-page selection. */
+export function pushDrill(state: ObservatoryViewState, frame: BodyDrillFrame): void {
+	state.drillStack.push(frame);
+	state.bodySelectedIndex = 0;
+	state.bodyScrollOffset = 0;
+	state.bodyNav = { kind: "none" };
+}
+
+/** Pop the top frame; returns true when something was popped. */
+export function popDrill(state: ObservatoryViewState): boolean {
+	if (state.drillStack.length === 0) return false;
+	state.drillStack.pop();
+	state.bodySelectedIndex = 0;
+	state.bodyScrollOffset = 0;
+	state.bodyNav = { kind: "none" };
+	return true;
+}
+
+/** Return the top drill frame, or null when at the lens root. */
+export function currentDrill(state: ObservatoryViewState): BodyDrillFrame | null {
+	const top = state.drillStack[state.drillStack.length - 1];
+	return top ?? null;
+}
+
+/** Reset all body-local navigation state. Called on lens-change. */
+function resetBodyDrill(state: ObservatoryViewState): void {
+	state.drillStack = [];
+	state.bodySelectedIndex = 0;
+	state.bodyNav = { kind: "none" };
+}
+
+/**
+ * Set the body's selection contract (called by the renderer each frame so
+ * the input handler knows whether j/k cycles items or scrolls). When called
+ * with a `list` of N items, clamps `bodySelectedIndex` to [0, N).
+ */
+export function setBodyNav(state: ObservatoryViewState, nav: BodyNavState): void {
+	state.bodyNav = nav;
+	if (nav.kind === "list") {
+		if (nav.ids.length === 0) {
+			state.bodySelectedIndex = 0;
+		} else if (state.bodySelectedIndex >= nav.ids.length) {
+			state.bodySelectedIndex = nav.ids.length - 1;
+		}
 	}
 }
 

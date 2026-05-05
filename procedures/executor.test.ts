@@ -11,7 +11,12 @@ import * as os from "node:os";
 // @ts-ignore
 import * as path from "node:path";
 
-import { composeEnv, defaultSpawnBash, executeWorkflow } from "./executor.ts";
+import {
+	composeEnv,
+	defaultSpawnBash,
+	executeWorkflow,
+	type RefreshObservatoryFn,
+} from "./executor.ts";
 import { parseWorkflow } from "./loader.ts";
 import type { BashSpawnFn, SpawnPiFn } from "./nodes/index.ts";
 import type { NodeOutput, WorkflowDefinition } from "./schema/index.ts";
@@ -610,5 +615,169 @@ nodes:
 		});
 		// Only `post` should have been spawned — `pre` was provided as a prior output.
 		expect(calls).toEqual(["echo post"]);
+	});
+
+	test("refreshObservatory spy fires after each handler-driven node and at run end", async () => {
+		const wf = makeWorkflow(`
+name: spy
+description: 2-node workflow exercising the observatory hook
+nodes:
+  - id: a
+    bash: echo a
+  - id: b
+    depends_on: [a]
+    bash: echo b
+`);
+		const runsDir = tmpRunsDir();
+		const { paths, run } = createRun({
+			runsDir,
+			workflow_name: wf.name,
+			user_message: "go",
+		});
+		const calls: Array<{ nodeIds: string[]; runId: string }> = [];
+		const refreshObservatory: RefreshObservatoryFn = (cwd, current) => {
+			expect(cwd).toBe("/tmp");
+			if (current) {
+				calls.push({
+					nodeIds: [...current.outputs.keys()].sort(),
+					runId: current.runPaths.runId,
+				});
+			}
+		};
+		const result = await executeWorkflow({
+			workflow: wf,
+			runId: run.id,
+			paths,
+			cwd: "/tmp",
+			workflowArgs: [],
+			signal: new AbortController().signal,
+			commandRoots: [],
+			spawnBash: stubBashAlwaysOk(),
+			refreshObservatory,
+		});
+		expect(result.finalStatus).toBe("completed");
+		// 2 nodes × 1 hook each + 1 final hook = 3 calls. Each call sees all
+		// outputs persisted up to that point, so the call sequence reveals the
+		// in-memory outputs map growing as nodes settle.
+		expect(calls.length).toBe(3);
+		expect(calls[0].nodeIds).toEqual(["a"]);
+		expect(calls[1].nodeIds).toEqual(["a", "b"]);
+		expect(calls[2].nodeIds).toEqual(["a", "b"]);
+	});
+
+	test("refreshObservatory throwing does not fail a run", async () => {
+		const wf = makeWorkflow(`
+name: hostile-hook
+description: hook throws — run must still finalize
+nodes:
+  - id: a
+    bash: echo a
+`);
+		const runsDir = tmpRunsDir();
+		const { paths, run } = createRun({
+			runsDir,
+			workflow_name: wf.name,
+			user_message: "go",
+		});
+		const result = await executeWorkflow({
+			workflow: wf,
+			runId: run.id,
+			paths,
+			cwd: "/tmp",
+			workflowArgs: [],
+			signal: new AbortController().signal,
+			commandRoots: [],
+			spawnBash: stubBashAlwaysOk(),
+			refreshObservatory: () => {
+				throw new Error("intentional observatory failure");
+			},
+		});
+		expect(result.finalStatus).toBe("completed");
+	});
+
+	test("end-to-end: lens data.json reflects history + current run + per-node usage", async () => {
+		const wf = makeWorkflow(`
+name: e2e-lens
+description: bash → prompt with token capture flowing through to the lens
+nodes:
+  - id: scan
+    bash: echo data
+  - id: summarize
+    depends_on: [scan]
+    prompt: "Summarize $scan.output"
+`);
+		// Real cwd so the default refreshObservatory writes the lens to disk.
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-procedures-e2e-"));
+		const runsDir = path.join(cwd, ".pi", "procedures", "runs");
+		fs.mkdirSync(runsDir, { recursive: true });
+		const { paths, run } = createRun({
+			runsDir,
+			workflow_name: wf.name,
+			user_message: "go",
+		});
+		// Stub spawnPi so it reports a usage payload for the prompt node.
+		const spawnPi: SpawnPiFn = async (opts) => ({
+			exitCode: 0,
+			finalText: `summary of: ${opts.prompt}`,
+			sessionId: "sess-e2e",
+			stderr: "",
+			aborted: false,
+			durationMs: 5,
+			usage: {
+				input: 100,
+				output: 50,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 150,
+				costUsd: 0.0012,
+			},
+		});
+
+		const result = await executeWorkflow({
+			workflow: wf,
+			runId: run.id,
+			paths,
+			cwd,
+			workflowArgs: [],
+			signal: new AbortController().signal,
+			commandRoots: [],
+			spawnBash: stubBashAlwaysOk(),
+			spawnPi,
+		});
+		expect(result.finalStatus).toBe("completed");
+
+		// Per-node usage should have been threaded into the persisted output.
+		const summarizeOutput = readNodeOutput(paths.nodesDir, "summarize");
+		expect(summarizeOutput?.state).toBe("completed");
+		if (summarizeOutput?.state === "completed") {
+			expect(summarizeOutput.usage?.totalTokens).toBe(150);
+			expect(summarizeOutput.startedAt).toBeDefined();
+			expect(summarizeOutput.completedAt).toBeDefined();
+			expect(summarizeOutput.durationMs).toBeGreaterThanOrEqual(0);
+		}
+
+		// Lens manifest + data + per-run snapshot all present.
+		const lensDir = path.join(cwd, ".pi", "observatory", "lenses", "procedures");
+		expect(fs.existsSync(path.join(lensDir, "lens.json"))).toBe(true);
+		const data = JSON.parse(
+			fs.readFileSync(path.join(lensDir, "data.json"), "utf-8"),
+		);
+		expect(data.runs.length).toBeGreaterThan(0);
+		expect(data.current).not.toBeNull();
+		expect(data.current.workflowName).toBe("e2e-lens");
+		expect(data.current.layers).toEqual([["scan"], ["summarize"]]);
+		expect(data.current.nodes.scan.status).toBe("completed");
+		expect(data.current.nodes.summarize.status).toBe("completed");
+		// Token totals roll up across nodes.
+		expect(data.current.totalTokens).toBe(150);
+
+		// Per-run snapshot file exists and matches.
+		const runSnapPath = path.join(lensDir, "runs", `${run.id}.json`);
+		expect(fs.existsSync(runSnapPath)).toBe(true);
+		const runSnap = JSON.parse(fs.readFileSync(runSnapPath, "utf-8"));
+		expect(runSnap.runId).toBe(run.id);
+		expect(runSnap.nodes.summarize.usage.totalTokens).toBe(150);
+
+		fs.rmSync(cwd, { recursive: true, force: true });
 	});
 });

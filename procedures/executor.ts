@@ -54,6 +54,10 @@ import type {
 	WorkflowRunStatus,
 } from "./schema/index.ts";
 import { isCancelNode } from "./schema/index.ts";
+import {
+	type CurrentRunInput,
+	refreshProceduresObservatoryLens,
+} from "./observatory.ts";
 import { spawnPiOnce } from "./spawn.ts";
 import {
 	appendEvent,
@@ -63,6 +67,20 @@ import {
 	writeNodeOutput,
 } from "./store.ts";
 import { checkTriggerRule } from "./triggers.ts";
+
+/**
+ * Side-effecting hook used by the executor to project run state into the
+ * observatory. Failures here must NEVER fail a run — call sites wrap in
+ * try/catch and swallow.
+ */
+export type RefreshObservatoryFn = (
+	cwd: string,
+	current: CurrentRunInput | null,
+) => void;
+
+export const defaultRefreshObservatory: RefreshObservatoryFn = (cwd, current) => {
+	refreshProceduresObservatoryLens(cwd, current);
+};
 
 // ---------------------------------------------------------------------------
 // Default spawn implementations
@@ -240,6 +258,11 @@ export interface ExecuteWorkflowInput {
 	spawnBash?: BashSpawnFn;
 	/** Optional stream callback used by handlers (forwarded to spawnPi). */
 	onDelta?: (nodeId: string, delta: string) => void;
+	/**
+	 * Override the observatory lens refresh side-effect (tests). Default is
+	 * `defaultRefreshObservatory` which writes `.pi/observatory/lenses/procedures/`.
+	 */
+	refreshObservatory?: RefreshObservatoryFn;
 }
 
 export interface ExecuteWorkflowResult {
@@ -262,7 +285,28 @@ export async function executeWorkflow(
 	const start = Date.now();
 	const spawnPi = input.spawnPi ?? defaultSpawnPi;
 	const spawnBash = input.spawnBash ?? defaultSpawnBash;
+	const refreshObservatory = input.refreshObservatory ?? defaultRefreshObservatory;
 	const resolveCommand = makeCommandResolver(input.commandRoots);
+
+	/**
+	 * Refresh the observatory lens after a node persists or at run end.
+	 * Wrapped so a failed write can't fail the run. Takes the outputs Map
+	 * explicitly so callers in parallel layers can pass a SNAPSHOT instead
+	 * of mutating the shared `outputs` reference (sibling handlers still
+	 * substitute against `upstreamOutputs`, so polluting that mid-layer
+	 * would let nodes nondeterministically observe non-dependency siblings).
+	 */
+	const safeRefreshObservatory = (outputsForLens: Map<string, NodeOutput>) => {
+		try {
+			refreshObservatory(input.cwd, {
+				runPaths: input.paths,
+				workflow: input.workflow,
+				outputs: outputsForLens,
+			});
+		} catch {
+			/* observatory writes are best-effort */
+		}
+	};
 
 	const layers = buildTopologicalLayers(input.workflow.nodes);
 	const outputs = new Map<string, NodeOutput>(input.priorOutputs ?? []);
@@ -347,8 +391,10 @@ export async function executeWorkflow(
 				const resumeSessionId =
 					!isParallel && node.context !== "fresh" ? lastSequentialSessionId : undefined;
 
+				const nodeStartedAtIso = new Date().toISOString();
+				const nodeStartedAtMs = Date.now();
 				emit(input.paths.eventsLogPath, {
-					timestamp: new Date().toISOString(),
+					timestamp: nodeStartedAtIso,
 					type: "node_started",
 					runId: input.runId,
 					nodeId: node.id,
@@ -379,9 +425,21 @@ export async function executeWorkflow(
 						error: `handler threw: ${(err as Error).message ?? String(err)}`,
 					};
 				}
+				output = withTiming(output, nodeStartedAtIso, Date.now() - nodeStartedAtMs);
 
 				// 5. Persist + emit terminal event for this node
 				writeNodeOutput(input.paths.nodesDir, node.id, output);
+				// Refresh the observatory from a SNAPSHOT — never mutate the
+				// shared `outputs` map mid-layer. Sibling handlers in a
+				// parallel layer hold a reference to it and substitute against
+				// it (sometimes after an async hop, e.g. commandHandler awaits
+				// resolveCommand before substitution); polluting it here could
+				// let one sibling nondeterministically observe another's
+				// `$node.output`. The post-layer merge at the bottom of the
+				// loop is the correct propagation point for the next layer.
+				const lensOutputs = new Map(outputs);
+				lensOutputs.set(node.id, output);
+				safeRefreshObservatory(lensOutputs);
 				if (output.state === "failed") {
 					emit(input.paths.eventsLogPath, {
 						timestamp: new Date().toISOString(),
@@ -454,6 +512,9 @@ export async function executeWorkflow(
 	else finalStatus = "completed";
 
 	updateRun(input.paths.runJsonPath, { status: finalStatus, completed_at: completedAt });
+	// At run end the post-layer merge has populated `outputs` with every
+	// settled node, so passing it directly is correct (and cheap).
+	safeRefreshObservatory(outputs);
 
 	const eventType: RunEvent["type"] =
 		finalStatus === "completed"
@@ -481,6 +542,47 @@ export async function executeWorkflow(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Stamp a NodeOutput with start/complete/duration timing. No-op for the
+ * pending/skipped variant, which doesn't carry timing fields. Called once per
+ * handler-driven node (skipped-by-condition nodes get their own untimed
+ * skippedOutput()).
+ *
+ * Constructs each variant explicitly because TypeScript's discriminated-union
+ * narrowing across `||` on the discriminator doesn't carry through to a later
+ * spread literal — switching on `state` exhausts the union cleanly.
+ */
+function withTiming(output: NodeOutput, startedAt: string, durationMs: number): NodeOutput {
+	const completedAt = new Date(new Date(startedAt).getTime() + durationMs).toISOString();
+	switch (output.state) {
+		case "pending":
+		case "skipped":
+			return output;
+		case "failed":
+			return {
+				state: "failed",
+				output: output.output,
+				error: output.error,
+				...(output.sessionId !== undefined ? { sessionId: output.sessionId } : {}),
+				...(output.usage !== undefined ? { usage: output.usage } : {}),
+				startedAt,
+				completedAt,
+				durationMs,
+			};
+		case "completed":
+		case "running":
+			return {
+				state: output.state,
+				output: output.output,
+				...(output.sessionId !== undefined ? { sessionId: output.sessionId } : {}),
+				...(output.usage !== undefined ? { usage: output.usage } : {}),
+				startedAt,
+				completedAt,
+				durationMs,
+			};
+	}
+}
 
 function emit(eventsLogPath: string, event: RunEvent): void {
 	try {

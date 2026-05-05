@@ -1,5 +1,11 @@
 // biome-ignore lint/suspicious/noTsIgnore: Project runtime provides Node built-ins; this workspace does not install @types/node.
 // @ts-ignore
+import { existsSync, readFileSync } from "node:fs";
+// biome-ignore lint/suspicious/noTsIgnore: Project runtime provides Node built-ins; this workspace does not install @types/node.
+// @ts-ignore
+import path from "node:path";
+// biome-ignore lint/suspicious/noTsIgnore: Project runtime provides Node built-ins; this workspace does not install @types/node.
+// @ts-ignore
 import process from "node:process";
 import type { Component, Focusable, TUI } from "@mariozechner/pi-tui";
 import type { Theme } from "@mariozechner/pi-coding-agent";
@@ -24,6 +30,7 @@ import {
 	renderDashboard,
 } from "./render-dashboard.ts";
 import { renderBriefing } from "./render-briefing.ts";
+import { type ProcedureRunDetail, renderDagRun } from "./render-dag-run.ts";
 import { renderStatusBoard } from "./render-status-board.ts";
 import { renderHelp } from "./render-help.ts";
 import {
@@ -39,6 +46,7 @@ import {
 	invalidateMindsCache,
 	notificationIsExpired,
 	readTtlCache,
+	setBodyNav,
 	setEntries,
 	setLensData,
 	setNotification,
@@ -238,6 +246,19 @@ export class ObservatoryOverlay implements Component, Focusable {
 				subtitle,
 			};
 		}
+		if (entry.manifest.kind === "dag-run") {
+			const drilledRunDetail = this.loadDrilledRunDetail();
+			const result = renderDagRun({
+				data: data.data,
+				drilledRunDetail,
+				drillStack: this.viewState.drillStack,
+				bodySelectedIndex: this.viewState.bodySelectedIndex,
+				width,
+				colorize: this.widgetColorize,
+			});
+			setBodyNav(this.viewState, result.bodyNav);
+			return { bodyLines: result.bodyLines, subtitle };
+		}
 		return {
 			bodyLines: renderStatusBoard(data.data, width, this.widgetColorize),
 			subtitle,
@@ -250,6 +271,31 @@ export class ObservatoryOverlay implements Component, Focusable {
 		const result = readLensData(this.lensesRoot, manifest.id, manifest);
 		setLensData(this.viewState, manifest.id, result);
 		return result;
+	}
+
+	/**
+	 * Resolve the run detail for the current top-of-drill-stack frame on the
+	 * dag-run lens. Returns null when:
+	 *  - the drill stack is empty (rendering the history list)
+	 *  - the drilled run IS the current run (renderer uses lens.data.current)
+	 *  - no per-run snapshot exists on disk (older run, pre-lens)
+	 *
+	 * The procedures lens writes per-run snapshots under
+	 * `<lensesRoot>/procedures/runs/<runId>.json` (see procedures/observatory.ts).
+	 * We read them inline here rather than cross-importing from procedures/ —
+	 * the JSON-on-disk shape is the contract.
+	 */
+	private loadDrilledRunDetail(): ProcedureRunDetail | null {
+		const top = this.viewState.drillStack[0];
+		if (!top || top.kind !== "run") return null;
+		const filePath = path.join(this.lensesRoot, "procedures", "runs", `${top.id}.json`);
+		if (!existsSync(filePath)) return null;
+		try {
+			const raw = readFileSync(filePath, "utf-8");
+			return JSON.parse(raw) as ProcedureRunDetail;
+		} catch {
+			return null;
+		}
 	}
 
 	private refreshSidebarItems(): void {
@@ -311,9 +357,18 @@ export class ObservatoryOverlay implements Component, Focusable {
 			const result = this.loadLensData(roomEntry.manifest);
 			if (result.ok) roomData = result.data;
 		}
+		const procEntry = this.viewState.entries.find(
+			(e) => e.id === "procedures" && e.status === "ok",
+		);
+		let proceduresData: unknown = null;
+		if (procEntry && procEntry.status === "ok") {
+			const result = this.loadLensData(procEntry.manifest);
+			if (result.ok) proceduresData = result.data;
+		}
 		return {
 			entries: this.viewState.entries,
 			roomData,
+			proceduresData,
 			minds,
 			activity,
 			now: Date.now(),

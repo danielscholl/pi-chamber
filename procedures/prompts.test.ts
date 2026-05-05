@@ -198,7 +198,9 @@ describe("formatProcedureReceipt", () => {
 		expect(lines).toContain("  ✓ collect");
 		// prompt node: excerpt of assistant text
 		expect(lines).toContain("  ✓ summarize: Hello! How can I help?");
-		expect(lines.at(-1)).toBe("  view: /procedures status rid-1");
+		expect(lines.at(-1)).toBe(
+			"  view: /procedures status rid-1  ·  /observatory → Procedures",
+		);
 	});
 
 	test("collapses multi-line / whitespace assistant text into one line", () => {
