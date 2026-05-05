@@ -188,7 +188,7 @@ function observatoryHelpText(): string {
 		"  data.json (status-board):",
 		"    array       → [{ name, status, ... }, ...]",
 		"",
-		'Ask a Genesis mind to populate a scaffolded newspaper, e.g.: /run jarvis "Update your newspaper lens with current state."',
+		"Ask a Genesis mind to populate a scaffolded newspaper — activate it with /mind <slug> and ask it to update its newspaper lens.",
 	].join("\n");
 }
 

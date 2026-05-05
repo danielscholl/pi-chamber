@@ -547,8 +547,6 @@ export default function (
 			`Mind: ${mindPath}`,
 			`Runnable agent: ${shimPath}`,
 			`Try direct chat: /mind ${request.slug}`,
-			`Try delegated task: /run ${request.slug} "Introduce yourself and read your memory first."`,
-			"Note: If the delegated agent does not appear immediately, run /reload or open /agents.",
 		].join("\n");
 
 		return {
@@ -608,7 +606,7 @@ function genesisUsageText(): string {
 	return [
 		"Usage: /genesis, /genesis custom, /genesis <starter>, /genesis list, or /genesis help.",
 		'Custom inline: /genesis name="Ariadne" role="OSDU architecture scout" voice="calm systems thinker"',
-		"After Genesis completes, activate the mind with /mind <slug> or delegate with /run <slug> <task>.",
+		"After Genesis completes, activate the mind with /mind <slug>.",
 	].join("\n");
 }
 
