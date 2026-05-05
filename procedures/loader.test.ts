@@ -1,0 +1,327 @@
+// biome-ignore lint/suspicious/noTsIgnore: Bun provides this module at test runtime.
+// @ts-ignore
+import { describe, expect, test } from "bun:test";
+// biome-ignore lint/suspicious/noTsIgnore: Bun bundles Node built-ins at runtime.
+// @ts-ignore
+import * as fs from "node:fs";
+// biome-ignore lint/suspicious/noTsIgnore: Bun bundles Node built-ins at runtime.
+// @ts-ignore
+import * as os from "node:os";
+// biome-ignore lint/suspicious/noTsIgnore: Bun bundles Node built-ins at runtime.
+// @ts-ignore
+import * as path from "node:path";
+
+import { discoverWorkflows, parseWorkflow } from "./loader.ts";
+
+function tmpDir(): string {
+	return fs.mkdtempSync(path.join(os.tmpdir(), "pi-procedures-loader-"));
+}
+
+describe("parseWorkflow — happy paths", () => {
+	test("minimal workflow with one prompt node", () => {
+		const yaml = `
+name: hello
+description: trivial
+nodes:
+  - id: greet
+    prompt: Say hi
+`;
+		const result = parseWorkflow(yaml, "hello.yaml");
+		expect(result.error).toBeNull();
+		expect(result.workflow?.name).toBe("hello");
+		expect(result.workflow?.nodes.length).toBe(1);
+		expect(result.warnings).toEqual([]);
+	});
+
+	test("DAG with depends_on, when:, trigger_rule", () => {
+		const yaml = `
+name: triage
+description: classify and act
+nodes:
+  - id: classify
+    prompt: classify the issue
+  - id: bug-flow
+    prompt: handle as bug
+    depends_on: [classify]
+    when: "$classify.output == 'bug'"
+  - id: feature-flow
+    prompt: handle as feature
+    depends_on: [classify]
+    when: "$classify.output == 'feature'"
+  - id: collect
+    bash: echo done
+    depends_on: [bug-flow, feature-flow]
+    trigger_rule: one_success
+`;
+		const result = parseWorkflow(yaml, "triage.yaml");
+		expect(result.error).toBeNull();
+		expect(result.workflow?.nodes.length).toBe(4);
+	});
+
+	test("workflow with bash and cancel nodes", () => {
+		const yaml = `
+name: bash-cancel
+description: bash plus cancel
+nodes:
+  - id: precheck
+    bash: test -f README.md
+  - id: stop
+    cancel: precondition failed
+    depends_on: [precheck]
+`;
+		expect(parseWorkflow(yaml, "bash-cancel.yaml").error).toBeNull();
+	});
+});
+
+describe("parseWorkflow — validation failures", () => {
+	test("missing 'name' is rejected", () => {
+		const yaml = `
+description: anonymous
+nodes:
+  - id: a
+    prompt: x
+`;
+		const result = parseWorkflow(yaml, "anon.yaml");
+		expect(result.workflow).toBeNull();
+		expect(result.error?.errorType).toBe("validation_error");
+		expect(result.error?.error).toMatch(/name/);
+	});
+
+	test("missing 'description' is rejected", () => {
+		const yaml = `
+name: nameless
+nodes:
+  - id: a
+    prompt: x
+`;
+		expect(parseWorkflow(yaml, "x.yaml").error?.error).toMatch(/description/);
+	});
+
+	test("legacy steps: format is rejected with migration hint", () => {
+		const yaml = `
+name: legacy
+description: old-shape
+steps:
+  - bash: echo hi
+`;
+		const result = parseWorkflow(yaml, "legacy.yaml");
+		expect(result.error?.error).toMatch(/steps:.*removed/);
+	});
+
+	test("empty nodes array is rejected", () => {
+		const yaml = `
+name: empty
+description: no work
+nodes: []
+`;
+		expect(parseWorkflow(yaml, "empty.yaml").error?.error).toMatch(/non-empty 'nodes:'/);
+	});
+
+	test("malformed YAML returns parse_error", () => {
+		const result = parseWorkflow(`name: broken\n  bad indent\nnodes: [\n`, "broken.yaml");
+		expect(result.error?.errorType).toBe("parse_error");
+	});
+
+	test("duplicate node id is rejected", () => {
+		const yaml = `
+name: dup
+description: dup ids
+nodes:
+  - id: a
+    prompt: x
+  - id: a
+    bash: echo x
+`;
+		expect(parseWorkflow(yaml, "dup.yaml").error?.error).toMatch(/Duplicate node id/);
+	});
+
+	test("unknown depends_on target is rejected", () => {
+		const yaml = `
+name: dangling
+description: dangling dep
+nodes:
+  - id: a
+    prompt: x
+    depends_on: [missing]
+`;
+		expect(parseWorkflow(yaml, "dangling.yaml").error?.error).toMatch(/unknown node 'missing'/);
+	});
+
+	test("cycle is rejected", () => {
+		const yaml = `
+name: loop
+description: cycle
+nodes:
+  - id: a
+    prompt: x
+    depends_on: [b]
+  - id: b
+    prompt: y
+    depends_on: [a]
+`;
+		expect(parseWorkflow(yaml, "cycle.yaml").error?.error).toMatch(/[Cc]ycle/);
+	});
+
+	test("dangling $nodeId.output reference is rejected", () => {
+		const yaml = `
+name: bad-ref
+description: ref to unknown
+nodes:
+  - id: a
+    prompt: "use $missing.output"
+`;
+		expect(parseWorkflow(yaml, "bad-ref.yaml").error?.error).toMatch(
+			/references unknown node '\$missing.output'/,
+		);
+	});
+
+	test("provider other than 'claude' is rejected", () => {
+		const yaml = `
+name: codex
+description: codex provider not yet supported
+provider: codex
+nodes:
+  - id: a
+    prompt: x
+`;
+		expect(parseWorkflow(yaml, "codex.yaml").error?.error).toMatch(/Phase 1.*claude/);
+	});
+});
+
+describe("parseWorkflow — warnings (non-fatal)", () => {
+	test("hooks on a prompt node is allowed but warns", () => {
+		const yaml = `
+name: hooks-warn
+description: hook field is documented but not honored
+nodes:
+  - id: a
+    prompt: x
+    hooks:
+      PreToolUse:
+        - matcher: ".*"
+          response: { decision: allow }
+`;
+		const result = parseWorkflow(yaml, "hooks.yaml");
+		expect(result.error).toBeNull();
+		expect(result.warnings.some((w) => w.kind === "ignored_capability")).toBe(true);
+	});
+
+	test("AI fields on a bash node warn (matches Archon)", () => {
+		const yaml = `
+name: ai-on-bash
+description: misplaced ai fields
+nodes:
+  - id: a
+    bash: echo hi
+    model: opus
+    allowed_tools: [Read]
+`;
+		const result = parseWorkflow(yaml, "ai-on-bash.yaml");
+		expect(result.error).toBeNull();
+		expect(result.warnings.some((w) => w.kind === "ai_fields_on_non_ai_node")).toBe(true);
+	});
+
+	test("script node is allowed but warned (Phase 1 not implemented)", () => {
+		const yaml = `
+name: scripty
+description: has a script node
+nodes:
+  - id: x
+    script: console.log('hi')
+    runtime: bun
+`;
+		const result = parseWorkflow(yaml, "script.yaml");
+		expect(result.error).toBeNull();
+		expect(
+			result.warnings.some((w) => w.kind === "ignored_capability" && /script/.test(w.message)),
+		).toBe(true);
+	});
+
+	test("invalid modelReasoningEffort warns and falls back", () => {
+		const yaml = `
+name: bad-effort
+description: bad effort
+modelReasoningEffort: turbo
+nodes:
+  - id: a
+    prompt: x
+`;
+		const result = parseWorkflow(yaml, "bad-effort.yaml");
+		expect(result.error).toBeNull();
+		expect(result.workflow?.modelReasoningEffort).toBeUndefined();
+		expect(result.warnings.some((w) => w.kind === "invalid_field_value")).toBe(true);
+	});
+
+	test("interactive loop in non-interactive workflow warns", () => {
+		const yaml = `
+name: lonely-loop
+description: interactive loop without top-level interactive
+nodes:
+  - id: l
+    loop:
+      prompt: keep going
+      until: DONE
+      max_iterations: 3
+      interactive: true
+      gate_message: "type next"
+`;
+		const result = parseWorkflow(yaml, "lonely.yaml");
+		expect(result.error).toBeNull();
+		expect(
+			result.warnings.some((w) => w.kind === "interactive_loop_in_non_interactive_workflow"),
+		).toBe(true);
+	});
+});
+
+describe("discoverWorkflows", () => {
+	test("returns empty when directory does not exist", () => {
+		const result = discoverWorkflows([{ dir: "/nonexistent/path", source: "global" }]);
+		expect(result.workflows).toEqual([]);
+		expect(result.errors).toEqual([]);
+	});
+
+	test("loads .yaml and .yml files, skips other extensions", () => {
+		const dir = tmpDir();
+		fs.writeFileSync(
+			path.join(dir, "good.yaml"),
+			"name: good\ndescription: a\nnodes:\n  - id: x\n    prompt: y\n",
+		);
+		fs.writeFileSync(
+			path.join(dir, "alt.yml"),
+			"name: alt\ndescription: a\nnodes:\n  - id: x\n    prompt: y\n",
+		);
+		fs.writeFileSync(path.join(dir, "ignored.txt"), "not yaml");
+
+		const result = discoverWorkflows([{ dir, source: "project" }]);
+		const names = result.workflows.map((w) => w.workflow.name).sort();
+		expect(names).toEqual(["alt", "good"]);
+		expect(result.workflows.every((w) => w.source === "project")).toBe(true);
+	});
+
+	test("later root overrides earlier same-named workflow", () => {
+		const bundled = tmpDir();
+		const project = tmpDir();
+		fs.writeFileSync(
+			path.join(bundled, "x.yaml"),
+			"name: x\ndescription: bundled\nnodes:\n  - id: a\n    prompt: y\n",
+		);
+		fs.writeFileSync(
+			path.join(project, "x.yaml"),
+			"name: x\ndescription: project\nnodes:\n  - id: a\n    prompt: z\n",
+		);
+		const result = discoverWorkflows([
+			{ dir: bundled, source: "bundled" },
+			{ dir: project, source: "project" },
+		]);
+		expect(result.workflows.length).toBe(1);
+		expect(result.workflows[0].workflow.description).toBe("project");
+		expect(result.workflows[0].source).toBe("project");
+	});
+
+	test("invalid YAML files are surfaced in errors", () => {
+		const dir = tmpDir();
+		fs.writeFileSync(path.join(dir, "broken.yaml"), "name: x\nnodes: [\nbad");
+		const result = discoverWorkflows([{ dir, source: "project" }]);
+		expect(result.errors.length).toBeGreaterThan(0);
+	});
+});

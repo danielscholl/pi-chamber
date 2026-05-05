@@ -41,7 +41,7 @@ Individual targets:
 
 ```bash
 bun run typecheck # tsc --noEmit
-bun test          # 48 test files via bun's runner
+bun test          # 60+ test files via bun's runner
 bun run build     # tsc -p tsconfig.build.json (emits dist/)
 ```
 
@@ -61,6 +61,6 @@ Conventional commits (`feat:`, `fix:`, `chore:`, `docs:`, ...) are encouraged bu
 
 ## Scope and design
 
-Each feature folder (`genesis/`, `mind/`, `room/`, `observatory/`, `assembly/`) is an independent Pi extension entry. The `index.ts` in each folder is the public Pi extension contract; surrounding files (`core.ts`, `prompts.ts`, `spawn.ts`, etc.) are implementation detail and should stay testable without a Pi runtime.
+Each feature folder (`genesis/`, `mind/`, `room/`, `observatory/`, `assembly/`, `procedures/`) is an independent Pi extension entry. The `index.ts` in each folder is the public Pi extension contract; surrounding files (`core.ts`, `prompts.ts`, `spawn.ts`, etc.) are implementation detail and should stay testable without a Pi runtime.
 
 When in doubt, prefer the smaller change.
