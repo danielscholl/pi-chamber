@@ -28,6 +28,7 @@ function writeMind(cwd: string, slug: string, soulFirstLine = "") {
 	for (const folder of paths.ideaFolders) fs.mkdirSync(folder, { recursive: true });
 	fs.mkdirSync(paths.workingMemoryPath, { recursive: true });
 	fs.mkdirSync(path.dirname(paths.shimPath), { recursive: true });
+	fs.writeFileSync(paths.agentPath, "# Operating Doctrine\n");
 	fs.writeFileSync(
 		paths.soulPath,
 		`${soulFirstLine || `# ${slug}`}\n\nIdentity body.\n`,

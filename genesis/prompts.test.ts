@@ -45,12 +45,9 @@ describe("buildGenesisAuthoringPrompt", () => {
 			expect(prompt).toContain("Do not browse or use network tools");
 			expect(prompt).toContain("Do not use raw write or edit tools");
 			expect(prompt).toContain(
-				"Before authoring any artifact, read the two shared doctrine files",
+				"Before authoring any artifact, read this mind's operating doctrine",
 			);
-			expect(prompt).toContain(`shared IDEA doctrine: ${paths.sharedIdeaPath}`);
-			expect(prompt).toContain(
-				`shared Observatory doctrine: ${paths.sharedObservatoryPath}`,
-			);
+			expect(prompt).toContain(`operating doctrine: ${paths.agentPath}`);
 			expect(prompt).toContain("publishes lenses to the workspace's local viewing surface");
 			expect(prompt).toContain("normalized markdown database with identity");
 			expect(prompt).toContain(
@@ -64,7 +61,7 @@ describe("buildGenesisAuthoringPrompt", () => {
 				"Triage sorts inbox material as ingest, task, or archive",
 			);
 			expect(prompt).toContain(
-				"Do not duplicate shared IDEA or Observatory doctrine wholesale",
+				"Do not duplicate the operating doctrine wholesale",
 			);
 			expect(prompt).toContain("do not invent user or project facts");
 			expect(prompt).toContain(
@@ -155,10 +152,9 @@ describe("buildAgentShim", () => {
 		expect(shim).toContain("defaultContext: fork");
 		expect(shim).toContain("defaultProgress: true");
 		expect(shim).toContain("`.pi/minds/ariadne`");
-		expect(shim).toContain("`.pi/minds/_shared/IDEA.md`");
-		expect(shim).toContain("`.pi/minds/_shared/OBSERVATORY.md`");
+		expect(shim).toContain("`.pi/minds/ariadne/AGENT.md`");
 		expect(shim).toContain(
-			"You inherit shared IDEA doctrine from `.pi/minds/_shared/IDEA.md` and shared Observatory doctrine from `.pi/minds/_shared/OBSERVATORY.md`",
+			"Your operating doctrine lives in `.pi/minds/ariadne/AGENT.md`",
 		);
 		expect(shim).toContain("`.pi/minds/ariadne/SOUL.md`");
 		expect(shim).toContain("`.pi/minds/ariadne/mind-index.md`");

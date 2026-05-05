@@ -39,12 +39,8 @@ function writeCompleteMind(cwd: string, slug: string) {
 		"# Mind Index\n\n- SOUL.md: identity.\n",
 	);
 	fs.writeFileSync(
-		paths.sharedIdeaPath,
-		"# Shared IDEA\n\nUse Capture and Ingest.\n",
-	);
-	fs.writeFileSync(
-		paths.sharedObservatoryPath,
-		"# Shared Observatory\n\nAuthor lenses with care.\n",
+		paths.agentPath,
+		"# Operating Doctrine\n\nUse Capture and Ingest. Author lenses with care.\n",
 	);
 	fs.writeFileSync(paths.memoryPath, "# Memory\n\nDurable context.\n");
 	fs.writeFileSync(paths.rulesPath, "# Rules\n\n- Be precise.\n");
@@ -128,7 +124,7 @@ describe("validateMindModeFiles", () => {
 });
 
 describe("loadMindContext", () => {
-	test("reads required mind files and shared IDEA when present", () => {
+	test("reads required mind files including operating doctrine", () => {
 		withTempProject((cwd) => {
 			writeCompleteMind(cwd, "miss-moneypenny");
 
@@ -136,14 +132,15 @@ describe("loadMindContext", () => {
 
 			expect(context.slug).toBe("miss-moneypenny");
 			expect(context.paths.mindPath).toBe(".pi/minds/miss-moneypenny");
-			expect(context.paths.sharedIdeaPath).toBe(".pi/minds/_shared/IDEA.md");
-			expect(context.paths.sharedObservatoryPath).toBe(".pi/minds/_shared/OBSERVATORY.md");
+			expect(context.paths.agentPath).toBe(
+				".pi/minds/miss-moneypenny/AGENT.md",
+			);
 			expect(context.paths.soulPath).toBe(".pi/minds/miss-moneypenny/SOUL.md");
 			expect(context.paths.memoryPath).toBe(
 				".pi/minds/miss-moneypenny/.working-memory/memory.md",
 			);
-			expect(context.sharedIdea).toContain("Use Capture and Ingest");
-			expect(context.sharedObservatory).toContain("Author lenses with care");
+			expect(context.agentDoctrine).toContain("Use Capture and Ingest");
+			expect(context.agentDoctrine).toContain("Author lenses with care");
 			expect(context.soul).toContain("Identity for miss-moneypenny");
 			expect(context.mindIndex).toContain("SOUL.md");
 			expect(context.memory).toContain("Durable context");
@@ -269,9 +266,8 @@ describe("buildMindModeSystemPrompt", () => {
 			);
 
 			expect(prompt).toContain("# Active Genesis Mind — miss-moneypenny");
-			expect(prompt).toContain("## Shared IDEA Doctrine");
+			expect(prompt).toContain("## Operating Doctrine — AGENT.md");
 			expect(prompt).toContain("Use Capture and Ingest");
-			expect(prompt).toContain("## Shared Observatory Doctrine");
 			expect(prompt).toContain("Author lenses with care");
 			expect(prompt).toContain("## Identity — SOUL.md");
 			expect(prompt).toContain("## Mind Index");

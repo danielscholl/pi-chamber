@@ -22,7 +22,7 @@ import {
 	parseGenesisAuthoringJson,
 	quoteYamlString,
 	resolveGenesisPaths,
-	seedSharedDoctrine,
+	seedAgentDoctrine,
 	slugify,
 	validateMind,
 	WORKING_MEMORY_DIR,
@@ -225,13 +225,7 @@ describe("mind structure and validation", () => {
 			for (const folder of IDEA_FOLDERS) {
 				expect(fs.existsSync(path.join(paths.mindPath, folder))).toBe(true);
 			}
-			expect(fs.existsSync(paths.sharedMindPath)).toBe(true);
-			expect(paths.sharedIdeaPath).toBe(
-				path.join(paths.basePath, "_shared", "IDEA.md"),
-			);
-			expect(paths.sharedObservatoryPath).toBe(
-				path.join(paths.basePath, "_shared", "OBSERVATORY.md"),
-			);
+			expect(paths.agentPath).toBe(path.join(paths.mindPath, "AGENT.md"));
 			expect(fs.existsSync(path.join(paths.mindPath, WORKING_MEMORY_DIR))).toBe(
 				true,
 			);
@@ -244,6 +238,7 @@ describe("mind structure and validation", () => {
 			expect(fs.existsSync(paths.soulPath)).toBe(false);
 			expect(fs.existsSync(paths.mindIndexPath)).toBe(false);
 			expect(fs.existsSync(paths.shimPath)).toBe(false);
+			expect(fs.existsSync(paths.agentPath)).toBe(false);
 		});
 	});
 
@@ -254,6 +249,7 @@ describe("mind structure and validation", () => {
 
 			const initial = validateMind(paths);
 			expect(initial.ok).toBe(false);
+			expect(initial.missing).toContain(paths.agentPath);
 			expect(initial.missing).toContain(paths.soulPath);
 			expect(initial.missing).toContain(paths.mindIndexPath);
 			expect(initial.invalid).toContain(paths.memoryPath);
@@ -261,6 +257,7 @@ describe("mind structure and validation", () => {
 			expect(initial.invalid).toContain(paths.logPath);
 			expect(initial.missing).toContain(paths.shimPath);
 
+			fs.writeFileSync(paths.agentPath, "# Operating Doctrine\n");
 			fs.writeFileSync(paths.soulPath, "# Soul\n");
 			fs.writeFileSync(paths.mindIndexPath, "# Index\n");
 			fs.writeFileSync(paths.memoryPath, "# Memory\n");
@@ -281,71 +278,46 @@ describe("mind structure and validation", () => {
 	});
 });
 
-describe("seedSharedDoctrine", () => {
-	test("writes IDEA.md and OBSERVATORY.md from bundled templates when missing", () => {
+describe("seedAgentDoctrine", () => {
+	test("writes AGENT.md from the bundled template when missing", () => {
 		withTempProject((cwd) => {
 			const paths = resolveGenesisPaths(cwd, "ariadne");
-			const seeded = seedSharedDoctrine(paths);
-			expect(seeded).toContain(paths.sharedIdeaPath);
-			expect(seeded).toContain(paths.sharedObservatoryPath);
-			expect(fs.existsSync(paths.sharedIdeaPath)).toBe(true);
-			expect(fs.existsSync(paths.sharedObservatoryPath)).toBe(true);
-			expect(fs.readFileSync(paths.sharedIdeaPath, "utf-8")).toContain(
-				"Shared IDEA Doctrine",
+			const seeded = seedAgentDoctrine(paths);
+			expect(seeded).toBe(paths.agentPath);
+			expect(fs.existsSync(paths.agentPath)).toBe(true);
+			expect(fs.readFileSync(paths.agentPath, "utf-8")).toContain(
+				"Operating Doctrine",
 			);
-			expect(fs.readFileSync(paths.sharedObservatoryPath, "utf-8")).toContain(
-				"Shared Observatory Doctrine",
+			expect(fs.readFileSync(paths.agentPath, "utf-8")).toContain(
+				"IDEA — knowledge architecture",
 			);
-		});
-	});
-
-	test("does not overwrite an existing IDEA.md", () => {
-		withTempProject((cwd) => {
-			const paths = resolveGenesisPaths(cwd, "ariadne");
-			fs.mkdirSync(paths.sharedMindPath, { recursive: true });
-			fs.writeFileSync(paths.sharedIdeaPath, "# Custom user IDEA\n");
-			const seeded = seedSharedDoctrine(paths);
-			expect(seeded).not.toContain(paths.sharedIdeaPath);
-			expect(seeded).toContain(paths.sharedObservatoryPath);
-			expect(fs.readFileSync(paths.sharedIdeaPath, "utf-8")).toBe(
-				"# Custom user IDEA\n",
+			expect(fs.readFileSync(paths.agentPath, "utf-8")).toContain(
+				"OBSERVATORY — lens publishing",
 			);
 		});
 	});
 
-	test("does not overwrite an existing OBSERVATORY.md", () => {
+	test("does not overwrite an existing AGENT.md", () => {
 		withTempProject((cwd) => {
 			const paths = resolveGenesisPaths(cwd, "ariadne");
-			fs.mkdirSync(paths.sharedMindPath, { recursive: true });
-			fs.writeFileSync(paths.sharedObservatoryPath, "# Custom Observatory\n");
-			const seeded = seedSharedDoctrine(paths);
-			expect(seeded).toContain(paths.sharedIdeaPath);
-			expect(seeded).not.toContain(paths.sharedObservatoryPath);
-			expect(fs.readFileSync(paths.sharedObservatoryPath, "utf-8")).toBe(
-				"# Custom Observatory\n",
+			fs.mkdirSync(paths.mindPath, { recursive: true });
+			fs.writeFileSync(paths.agentPath, "# Custom doctrine\n");
+			const seeded = seedAgentDoctrine(paths);
+			expect(seeded).toBeNull();
+			expect(fs.readFileSync(paths.agentPath, "utf-8")).toBe(
+				"# Custom doctrine\n",
 			);
 		});
 	});
 
-	test("returns an empty array when both files already exist", () => {
-		withTempProject((cwd) => {
-			const paths = resolveGenesisPaths(cwd, "ariadne");
-			fs.mkdirSync(paths.sharedMindPath, { recursive: true });
-			fs.writeFileSync(paths.sharedIdeaPath, "# A\n");
-			fs.writeFileSync(paths.sharedObservatoryPath, "# B\n");
-			expect(seedSharedDoctrine(paths)).toEqual([]);
-		});
-	});
-
-	test("creates the shared mind directory if it does not exist yet", () => {
+	test("creates the mind directory if it does not exist yet", () => {
 		withTempProject((cwd) => {
 			const paths = resolveGenesisPaths(cwd, "ariadne");
 			// Note: NOT calling createMindStructure first.
-			expect(fs.existsSync(paths.sharedMindPath)).toBe(false);
-			seedSharedDoctrine(paths);
-			expect(fs.existsSync(paths.sharedMindPath)).toBe(true);
-			expect(fs.existsSync(paths.sharedIdeaPath)).toBe(true);
-			expect(fs.existsSync(paths.sharedObservatoryPath)).toBe(true);
+			expect(fs.existsSync(paths.mindPath)).toBe(false);
+			seedAgentDoctrine(paths);
+			expect(fs.existsSync(paths.mindPath)).toBe(true);
+			expect(fs.existsSync(paths.agentPath)).toBe(true);
 		});
 	});
 });

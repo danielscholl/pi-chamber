@@ -36,6 +36,7 @@ function writeMind(cwd: string, slug: string) {
 		fs.mkdirSync(folder, { recursive: true });
 	fs.mkdirSync(paths.workingMemoryPath, { recursive: true });
 	fs.mkdirSync(path.dirname(paths.shimPath), { recursive: true });
+	fs.writeFileSync(paths.agentPath, "# Operating Doctrine\n");
 	fs.writeFileSync(paths.soulPath, `# ${slug}\n\nbody\n`);
 	fs.writeFileSync(paths.mindIndexPath, "# Index\n\n- SOUL.md\n");
 	fs.writeFileSync(paths.memoryPath, "# Memory\n");

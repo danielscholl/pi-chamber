@@ -93,12 +93,13 @@ Do not bypass Genesis authoring rules. Live `/genesis` requests run in a child P
 - Live `/genesis` runs in a child Pi process (`genesis/spawn.ts`) launched with `--no-extensions`; the subagent emits one JSON object containing the seven authored fields and the parent writes the files via the same internal helper that backs `genesis_write_files`. The tool itself stays registered for compatibility but is not the live path.
 - Validate path containment with robust path helpers, not string-prefix checks.
 - Keep deterministic logic in `genesis/core.ts` / `genesis/prompts.ts` (including the JSON parser and the subagent prompt builder) so it can be tested without a live Pi runtime.
-- Generated shims should remain compatible with `pi-subagents` frontmatter and should instruct agents to read shared IDEA doctrine plus their mind files at task start.
-- `mind` reads and injects shared IDEA doctrine plus existing mind files for direct chat in the main session; it must not bypass the Genesis write helper during live `/genesis` authoring.
+- Generated shims should remain compatible with `pi-subagents` frontmatter and should instruct agents to read their per-mind operating doctrine (`AGENT.md`) plus other mind files at task start.
+- Each Genesis mind owns its operating doctrine in `<mindPath>/AGENT.md`, seeded from `genesis/templates/AGENT.md` at scaffold time. Doctrine is per-mind, not shared — `removeMindOnce` cleans it up automatically when a mind is retired.
+- `mind` reads and injects the per-mind operating doctrine plus existing mind files for direct chat in the main session; it must not bypass the Genesis write helper during live `/genesis` authoring.
 
 ## Mind rules
 
-- `/mind` activates a Genesis mind in the current main Pi session via system-prompt injection at every `before_agent_start`. There is no child Pi process and no session swap; the mind's persona, durable memory, rules, log, and shared doctrine are appended to the parent session's system prompt. Activation is instantaneous (no TUI flicker).
+- `/mind` activates a Genesis mind in the current main Pi session via system-prompt injection at every `before_agent_start`. There is no child Pi process and no session swap; the mind's persona, durable memory, rules, log, and per-mind operating doctrine (`AGENT.md`) are appended to the parent session's system prompt. Activation is instantaneous (no TUI flicker).
 - Mind files are re-read every turn so that edits to `memory.md`, `rules.md`, or `log.md` become live on the next turn. Do not cache.
 - `/mind` does **not** apply `mind-config.json` (`tools`, `model`, `fallbackModels`). That file is consumed only by `/room` when spawning per-mind child Pi processes. Direct-chat inherits the parent session's tool surface and model by design: direct-chat *is* the parent session. If a mind needs restricted tools or a specific model, run it inside a room.
 - Two end verbs:

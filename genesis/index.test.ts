@@ -535,6 +535,7 @@ describe("removeMindOnce", () => {
 		for (const folder of paths.ideaFolders) fs.mkdirSync(folder, { recursive: true });
 		fs.mkdirSync(paths.workingMemoryPath, { recursive: true });
 		fs.mkdirSync(path.dirname(paths.shimPath), { recursive: true });
+		fs.writeFileSync(paths.agentPath, "# Operating Doctrine\n");
 		fs.writeFileSync(paths.soulPath, `# ${slug}\n\nbody\n`);
 		fs.writeFileSync(paths.mindIndexPath, "# Index\n");
 		fs.writeFileSync(paths.memoryPath, "# Memory\n");

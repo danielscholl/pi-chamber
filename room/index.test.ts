@@ -101,6 +101,7 @@ function withTempProject<T>(fn: (cwd: string) => Promise<T> | T): Promise<T> {
 function writeCompleteMind(cwd: string, slug: string) {
 	const paths = resolveGenesisPaths(cwd, slug);
 	createMindStructure(paths);
+	fs.writeFileSync(paths.agentPath, "# Operating Doctrine\n\nIDEA + Observatory.\n");
 	fs.writeFileSync(paths.soulPath, `# ${slug}\n\nI am ${slug}.\n`);
 	fs.writeFileSync(paths.mindIndexPath, "# Mind Index\n\n- SOUL.md\n");
 	fs.writeFileSync(paths.memoryPath, "# Memory\n\nCurated memory.\n");

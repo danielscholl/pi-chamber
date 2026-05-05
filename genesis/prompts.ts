@@ -41,12 +41,11 @@ Your voice energy: ${voiceDescription}
 
 IMPORTANT: Before creating the file contents, reason about this voice/character from model-local knowledge only. Do not browse or use network tools for persona research. Understand their communication style, values, how they handle pressure, and their energy. Channel that into every artifact you author.
 
-Before authoring any artifact, read the two shared doctrine files:
+Before authoring any artifact, read this mind's operating doctrine:
 
-- shared IDEA doctrine: ${input.paths.sharedIdeaPath}
-- shared Observatory doctrine: ${input.paths.sharedObservatoryPath}
+- operating doctrine: ${input.paths.agentPath}
 
-Use IDEA as the source of truth for this mind's knowledge architecture — a Genesis mind is a normalized markdown database with identity, not merely a persona with memory files. Use OBSERVATORY as the source of truth for how this mind publishes lenses to the workspace's local viewing surface when the operator asks for one.
+The doctrine is the source of truth for this mind's knowledge architecture (IDEA — a normalized markdown database with identity, not merely a persona with memory files) and for how the mind publishes lenses to the workspace's local viewing surface when the operator asks for one.
 
 ## IDEA birth contract
 
@@ -63,7 +62,7 @@ Your generated artifacts must preserve these invariants:
 - Triage sorts inbox material as ingest, task, or archive.
 - Retrieval searches the mind before assuming.
 
-Do not duplicate shared IDEA or Observatory doctrine wholesale in the mind-specific files. Reference them and specialize for this mind's role, voice, and operating needs.
+Do not duplicate the operating doctrine wholesale in the mind-specific files. Reference it and specialize for this mind's role, voice, and operating needs.
 
 Create content for these artifacts:
 
@@ -122,12 +121,11 @@ Your voice energy: ${voiceDescription}
 
 IMPORTANT: Before authoring any artifact, reason about this voice/character from model-local knowledge only. Do not browse or use network tools for persona research. Understand their communication style, values, how they handle pressure, and their energy. Channel that into every artifact you author.
 
-Before authoring any artifact, read the two shared doctrine files:
+Before authoring any artifact, read this mind's operating doctrine:
 
-- shared IDEA doctrine: ${input.paths.sharedIdeaPath}
-- shared Observatory doctrine: ${input.paths.sharedObservatoryPath}
+- operating doctrine: ${input.paths.agentPath}
 
-Use IDEA as the source of truth for this mind's knowledge architecture — a Genesis mind is a normalized markdown database with identity, not merely a persona with memory files. Use OBSERVATORY as the source of truth for how this mind publishes lenses to the workspace's local viewing surface when the operator asks for one.
+The doctrine is the source of truth for this mind's knowledge architecture (IDEA — a normalized markdown database with identity, not merely a persona with memory files) and for how the mind publishes lenses to the workspace's local viewing surface when the operator asks for one.
 
 ## IDEA birth contract
 
@@ -144,7 +142,7 @@ Your generated artifacts must preserve these invariants:
 - Triage sorts inbox material as ingest, task, or archive.
 - Retrieval searches the mind before assuming.
 
-Do not duplicate shared IDEA or Observatory doctrine wholesale in the mind-specific files. Reference them and specialize for this mind's role, voice, and operating needs.
+Do not duplicate the operating doctrine wholesale in the mind-specific files. Reference it and specialize for this mind's role, voice, and operating needs.
 
 Author content for these artifacts:
 
@@ -189,8 +187,7 @@ export function buildAgentShim(input: AgentShimInput): string {
 	const mindPath = mindReference(input);
 	const soulPath = `${mindPath}/SOUL.md`;
 	const mindIndexPath = `${mindPath}/mind-index.md`;
-	const sharedIdeaPath = sharedIdeaReference(input);
-	const sharedObservatoryPath = sharedObservatoryReference(input);
+	const agentPath = `${mindPath}/AGENT.md`;
 	const memoryPath = `${mindPath}/.working-memory/memory.md`;
 	const rulesPath = `${mindPath}/.working-memory/rules.md`;
 	const logPath = `${mindPath}/.working-memory/log.md`;
@@ -214,19 +211,18 @@ You are ${input.name}, a Genesis mind stored at:
 \`${mindPath}\`
 
 Your identity lives in \`SOUL.md\`. Your continuity lives in \`.working-memory/\`.
-You inherit shared IDEA doctrine from \`${sharedIdeaPath}\` and shared Observatory doctrine from \`${sharedObservatoryPath}\`.
+Your operating doctrine lives in \`${agentPath}\` — knowledge architecture (IDEA) and observatory lens publishing.
 
 At the start of every task, read:
 
-- \`${sharedIdeaPath}\`
-- \`${sharedObservatoryPath}\`
+- \`${agentPath}\`
 - \`${soulPath}\`
 - \`${mindIndexPath}\`
 - \`${memoryPath}\`
 - \`${rulesPath}\`
 - \`${logPath}\`
 
-Then follow the shared IDEA doctrine, the shared Observatory doctrine, the IDEA operating contract, the observatory authoring contract, the task-mode contract, and the operating instructions below.
+Then follow the operating doctrine, the IDEA operating contract, the observatory authoring contract, the task-mode contract, and the operating instructions below.
 
 ## IDEA operating contract
 
@@ -248,7 +244,7 @@ Then follow the shared IDEA doctrine, the shared Observatory doctrine, the IDEA 
 
 The observatory is the operator's local viewing surface. The framework owns the server, renderer, discovery, and validation; you own lens content.
 
-- When the operator asks you to author or update an observatory lens (under \`.pi/observatory/lenses/\`), follow the doctrine in \`${sharedObservatoryPath}\`. It defines the manifest schema, the v1 lens kinds (\`briefing\` and \`status-board\`), the status-text → color vocabulary, and the authoring discipline.
+- When the operator asks you to author or update an observatory lens (under \`.pi/observatory/lenses/\`), follow the doctrine in \`${agentPath}\`. It defines the manifest schema, the v1 lens kinds (\`briefing\` and \`status-board\`), the status-text → color vocabulary, and the authoring discipline.
 - Each lens is two files: \`.pi/observatory/lenses/<slug>/lens.json\` plus a data file referenced by the manifest's \`source\` field.
 - Use real, observable data. Read the workspace before writing — don't invent counts or status.
 - Keep lenses terse: briefings ≤ 8 fields, status-boards ≤ 8 entries, all values strings or numbers, no nested objects.
@@ -289,24 +285,6 @@ function mindReference(input: AgentShimInput): string {
 
 	const relative = path.relative(input.paths.cwd, input.paths.mindPath);
 	return normalizePathSeparators(relative || input.paths.mindPath);
-}
-
-function sharedIdeaReference(input: AgentShimInput): string {
-	if (!input.paths) {
-		return ".pi/minds/_shared/IDEA.md";
-	}
-
-	const relative = path.relative(input.paths.cwd, input.paths.sharedIdeaPath);
-	return normalizePathSeparators(relative || input.paths.sharedIdeaPath);
-}
-
-function sharedObservatoryReference(input: AgentShimInput): string {
-	if (!input.paths) {
-		return ".pi/minds/_shared/OBSERVATORY.md";
-	}
-
-	const relative = path.relative(input.paths.cwd, input.paths.sharedObservatoryPath);
-	return normalizePathSeparators(relative || input.paths.sharedObservatoryPath);
 }
 
 function normalizePathSeparators(value: string): string {

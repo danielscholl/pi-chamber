@@ -25,8 +25,7 @@ export type MindConfig = {
 
 export type MindModePaths = {
 	mindPath: string;
-	sharedIdeaPath: string;
-	sharedObservatoryPath: string;
+	agentPath: string;
 	soulPath: string;
 	mindIndexPath: string;
 	memoryPath: string;
@@ -44,8 +43,7 @@ export type MindValidationResult = {
 export type MindContext = {
 	slug: string;
 	paths: MindModePaths;
-	sharedIdea: string;
-	sharedObservatory: string;
+	agentDoctrine: string;
 	soul: string;
 	mindIndex: string;
 	memory: string;
@@ -174,8 +172,7 @@ export function loadMindContext(
 		cwd: paths.cwd,
 		slug,
 		paths: toMindModeDisplayPaths(paths),
-		sharedIdea: readOptionalNonEmptyFile(paths.sharedIdeaPath),
-		sharedObservatory: readOptionalNonEmptyFile(paths.sharedObservatoryPath),
+		agentDoctrine: readFileSync(paths.agentPath, "utf-8").trim(),
 		soul: readFileSync(paths.soulPath, "utf-8").trim(),
 		mindIndex: readFileSync(paths.mindIndexPath, "utf-8").trim(),
 		memory: readFileSync(paths.memoryPath, "utf-8").trim(),
@@ -266,21 +263,16 @@ You are operating in Genesis direct-chat mind mode. The current main Pi session 
 
 ## Mind files active in this prompt
 
-- Shared IDEA doctrine: ${context.paths.sharedIdeaPath}${context.sharedIdea ? "" : " (not found or empty)"}
-- Shared Observatory doctrine: ${context.paths.sharedObservatoryPath}${context.sharedObservatory ? "" : " (not found or empty)"}
+- Operating doctrine: ${context.paths.agentPath}
 - Identity: ${context.paths.soulPath}
 - Mind index: ${context.paths.mindIndexPath}
 - Durable memory: ${context.paths.memoryPath}
 - Operating rules: ${context.paths.rulesPath}
 - Recent chronological log: ${context.paths.logPath}${context.logTruncated ? " (tail only)" : ""}
 
-## Shared IDEA Doctrine
+## Operating Doctrine — AGENT.md
 
-${context.sharedIdea || "No shared IDEA doctrine file was found for this project. Continue using the mind-specific files below."}
-
-## Shared Observatory Doctrine
-
-${context.sharedObservatory || "No shared Observatory doctrine file was found for this project. If the operator asks you to author observatory lenses, ask for the schema before writing."}
+${context.agentDoctrine}
 
 ## Identity — SOUL.md
 
@@ -316,8 +308,6 @@ ${context.log}
 function assertMindModePathsInsideProject(paths: GenesisPaths): void {
 	for (const [label, targetPath] of [
 		["mindPath", paths.mindPath],
-		["sharedIdeaPath", paths.sharedIdeaPath],
-		["sharedObservatoryPath", paths.sharedObservatoryPath],
 		...requiredPathEntries(paths),
 	] as const) {
 		assertInsideProject(paths.cwd, targetPath, label);
@@ -326,6 +316,7 @@ function assertMindModePathsInsideProject(paths: GenesisPaths): void {
 
 function requiredPathEntries(paths: GenesisPaths): Array<[string, string]> {
 	return [
+		["agentPath", paths.agentPath],
 		["soulPath", paths.soulPath],
 		["mindIndexPath", paths.mindIndexPath],
 		["memoryPath", paths.memoryPath],
@@ -337,19 +328,13 @@ function requiredPathEntries(paths: GenesisPaths): Array<[string, string]> {
 function toMindModeDisplayPaths(paths: GenesisPaths): MindModePaths {
 	return {
 		mindPath: relativeToCwd(paths.cwd, paths.mindPath),
-		sharedIdeaPath: relativeToCwd(paths.cwd, paths.sharedIdeaPath),
-		sharedObservatoryPath: relativeToCwd(paths.cwd, paths.sharedObservatoryPath),
+		agentPath: relativeToCwd(paths.cwd, paths.agentPath),
 		soulPath: relativeToCwd(paths.cwd, paths.soulPath),
 		mindIndexPath: relativeToCwd(paths.cwd, paths.mindIndexPath),
 		memoryPath: relativeToCwd(paths.cwd, paths.memoryPath),
 		rulesPath: relativeToCwd(paths.cwd, paths.rulesPath),
 		logPath: relativeToCwd(paths.cwd, paths.logPath),
 	};
-}
-
-function readOptionalNonEmptyFile(filePath: string): string {
-	if (!isNonEmptyFile(filePath)) return "";
-	return readFileSync(filePath, "utf-8").trim();
 }
 
 function readTailWithMarker(

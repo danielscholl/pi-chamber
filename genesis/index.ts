@@ -13,7 +13,7 @@ import {
 	assertInsideProject,
 	collapseOneLine,
 	createMindStructure,
-	seedSharedDoctrine,
+	seedAgentDoctrine,
 	ensureTrailingNewline,
 	type GenesisAuthoringContent,
 	type GenesisConfig,
@@ -329,7 +329,7 @@ export default function (
 
 		try {
 			createMindStructure(paths);
-			seedSharedDoctrine(paths);
+			seedAgentDoctrine(paths);
 		} catch (error) {
 			notify(
 				ctx,
@@ -735,8 +735,7 @@ function validateGenesisContent(params: GenesisWriteFilesParams) {
 function assertGenesisPathsInsideProject(paths: GenesisPaths): void {
 	for (const [label, targetPath] of [
 		["mindPath", paths.mindPath],
-		["sharedMindPath", paths.sharedMindPath],
-		["sharedIdeaPath", paths.sharedIdeaPath],
+		["agentPath", paths.agentPath],
 		["shimPath", paths.shimPath],
 		["soulPath", paths.soulPath],
 		["mindIndexPath", paths.mindIndexPath],
@@ -754,8 +753,7 @@ function assertStoredPathsUnchanged(
 ): void {
 	const pairs: Array<[string, string, string]> = [
 		["mindPath", request.paths.mindPath, resolved.mindPath],
-		["sharedMindPath", request.paths.sharedMindPath, resolved.sharedMindPath],
-		["sharedIdeaPath", request.paths.sharedIdeaPath, resolved.sharedIdeaPath],
+		["agentPath", request.paths.agentPath, resolved.agentPath],
 		["shimPath", request.paths.shimPath, resolved.shimPath],
 		["soulPath", request.paths.soulPath, resolved.soulPath],
 		["mindIndexPath", request.paths.mindIndexPath, resolved.mindIndexPath],
@@ -980,7 +978,7 @@ export async function authorMindOnce(
 
 	try {
 		createMindStructure(paths);
-		seedSharedDoctrine(paths);
+		seedAgentDoctrine(paths);
 	} catch (error) {
 		return fail(slug, `scaffold failed: ${errorMessage(error)}`);
 	}

@@ -14,12 +14,12 @@ import path from "node:path";
 // @ts-ignore
 import { fileURLToPath } from "node:url";
 
-// Where the bundled shared doctrine templates live, relative to this module.
-// Resolved at load time so seedSharedDoctrine can read them without callers
+// Where the bundled doctrine template lives, relative to this module.
+// Resolved at load time so seedAgentDoctrine can read it without callers
 // having to know about the package layout.
-const SHARED_TEMPLATES_DIR = path.join(
+const TEMPLATES_DIR = path.join(
 	path.dirname(fileURLToPath(import.meta.url)),
-	"shared",
+	"templates",
 );
 
 export const IDEA_FOLDERS = [
@@ -29,9 +29,7 @@ export const IDEA_FOLDERS = [
 	"initiatives",
 	"Archive",
 ] as const;
-export const SHARED_MIND_DIR = "_shared";
-export const SHARED_IDEA_FILE = "IDEA.md";
-export const SHARED_OBSERVATORY_FILE = "OBSERVATORY.md";
+export const AGENT_DOCTRINE_FILE = "AGENT.md";
 export const WORKING_MEMORY_DIR = ".working-memory";
 export const WORKING_MEMORY_FILES = [
 	"memory.md",
@@ -63,9 +61,7 @@ export interface GenesisPaths {
 	mindPath: string;
 	shimPath: string;
 	ideaFolders: string[];
-	sharedMindPath: string;
-	sharedIdeaPath: string;
-	sharedObservatoryPath: string;
+	agentPath: string;
 	workingMemoryPath: string;
 	soulPath: string;
 	mindIndexPath: string;
@@ -231,16 +227,12 @@ export function resolveGenesisPaths(
 		"agentShimPath",
 	);
 	const mindPath = path.join(basePath, slug);
-	const sharedMindPath = path.join(basePath, SHARED_MIND_DIR);
-	const sharedIdeaPath = path.join(sharedMindPath, SHARED_IDEA_FILE);
-	const sharedObservatoryPath = path.join(sharedMindPath, SHARED_OBSERVATORY_FILE);
+	const agentPath = path.join(mindPath, AGENT_DOCTRINE_FILE);
 	const shimPath = path.join(agentShimPath, `${slug}.md`);
 	const workingMemoryPath = path.join(mindPath, WORKING_MEMORY_DIR);
 
 	assertInsideProject(root, mindPath, "mindPath");
-	assertInsideProject(root, sharedMindPath, "sharedMindPath");
-	assertInsideProject(root, sharedIdeaPath, "sharedIdeaPath");
-	assertInsideProject(root, sharedObservatoryPath, "sharedObservatoryPath");
+	assertInsideProject(root, agentPath, "agentPath");
 	assertInsideProject(root, shimPath, "shimPath");
 
 	return {
@@ -251,9 +243,7 @@ export function resolveGenesisPaths(
 		mindPath,
 		shimPath,
 		ideaFolders: IDEA_FOLDERS.map((folder) => path.join(mindPath, folder)),
-		sharedMindPath,
-		sharedIdeaPath,
-		sharedObservatoryPath,
+		agentPath,
 		workingMemoryPath,
 		soulPath: path.join(mindPath, "SOUL.md"),
 		mindIndexPath: path.join(mindPath, "mind-index.md"),
@@ -269,7 +259,6 @@ export function createMindStructure(paths: GenesisPaths): void {
 		mkdirSync(folder, { recursive: true });
 	}
 	mkdirSync(paths.workingMemoryPath, { recursive: true });
-	mkdirSync(paths.sharedMindPath, { recursive: true });
 	mkdirSync(path.dirname(paths.shimPath), { recursive: true });
 
 	for (const placeholderPath of [
@@ -283,31 +272,17 @@ export function createMindStructure(paths: GenesisPaths): void {
 	}
 }
 
-// Seed the project's shared mind doctrine (IDEA.md, OBSERVATORY.md) from
-// the bundled templates, but only when the target files don't already
-// exist. Returns the absolute paths of any files actually written, so the
-// caller can surface "seeded N files" feedback. Never overwrites; if the
-// operator has customized doctrine already, this is a no-op for that file.
-export function seedSharedDoctrine(paths: GenesisPaths): string[] {
-	mkdirSync(paths.sharedMindPath, { recursive: true });
-	const targets: Array<{ target: string; template: string }> = [
-		{
-			target: paths.sharedIdeaPath,
-			template: path.join(SHARED_TEMPLATES_DIR, SHARED_IDEA_FILE),
-		},
-		{
-			target: paths.sharedObservatoryPath,
-			template: path.join(SHARED_TEMPLATES_DIR, SHARED_OBSERVATORY_FILE),
-		},
-	];
-	const seeded: string[] = [];
-	for (const { target, template } of targets) {
-		if (existsSync(target)) continue;
-		if (!existsSync(template)) continue;
-		writeFileSync(target, readFileSync(template, "utf-8"), "utf-8");
-		seeded.push(target);
-	}
-	return seeded;
+// Seed this mind's operating doctrine (AGENT.md) from the bundled template.
+// Only writes when the target doesn't already exist, so an operator who has
+// customized this mind's doctrine never gets clobbered by a re-run. Returns
+// the absolute path written, or null when nothing was written.
+export function seedAgentDoctrine(paths: GenesisPaths): string | null {
+	mkdirSync(paths.mindPath, { recursive: true });
+	if (existsSync(paths.agentPath)) return null;
+	const template = path.join(TEMPLATES_DIR, AGENT_DOCTRINE_FILE);
+	if (!existsSync(template)) return null;
+	writeFileSync(paths.agentPath, readFileSync(template, "utf-8"), "utf-8");
+	return paths.agentPath;
 }
 
 export function validateMind(paths: GenesisPaths): ValidationResult {
@@ -327,6 +302,7 @@ export function validateMind(paths: GenesisPaths): ValidationResult {
 	}
 
 	for (const file of [
+		paths.agentPath,
 		paths.soulPath,
 		paths.mindIndexPath,
 		paths.memoryPath,
