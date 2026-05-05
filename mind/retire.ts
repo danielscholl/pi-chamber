@@ -122,7 +122,6 @@ export async function runRetireCommand(
 		notify(ctx, "UI does not support select; cannot confirm retire.", "error");
 		return;
 	}
-	notify(ctx, renderRetireConfirmation(targetSlug), "info");
 	const choice = await ctx.ui.select.call(
 		ctx.ui,
 		`Retire mind "${targetSlug}"?`,
@@ -232,15 +231,6 @@ function safeListGenesisMinds(cwd: string): string[] {
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
-
-function renderRetireConfirmation(slug: string): string {
-	return [
-		`RETIRING — ${slug}`,
-		`  mind directory: .pi/minds/${slug}/`,
-		`  shim:           .pi/agents/${slug}.md`,
-		`  newspaper lens: .pi/observatory/lenses/${slug}-newspaper/`,
-	].join("\n");
-}
 
 function renderBlockedByRooms(
 	slug: string,

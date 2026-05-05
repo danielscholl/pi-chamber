@@ -544,7 +544,6 @@ export default function (
 		const shimPath = relativeToCwd(paths.cwd, paths.shimPath);
 		const message = [
 			"Genesis complete.",
-			`Mind: ${mindPath}`,
 			`Try direct chat: /mind ${request.slug}`,
 		].join("\n");
 
