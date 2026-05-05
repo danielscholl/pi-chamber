@@ -247,6 +247,33 @@ describe("promptHandler", () => {
 		expect(captured?.prompt).toBe("context: it's fine");
 	});
 
+	test("forwards env (ARTIFACTS_DIR, $1..$9, ARGUMENTS, upstreams) to spawnPi", async () => {
+		// Regression test for the env-propagation bug surfaced by the Codex
+		// review: prompt nodes must inherit the procedure env so AI tools
+		// (Bash, Write) inside the spawned pi see $ARTIFACTS_DIR etc.
+		const node: PromptNode = { id: "x", prompt: "p" };
+		const env = {
+			ARTIFACTS_DIR: "/runs/abc/artifacts",
+			BASE_BRANCH: "main",
+			"1": "first-arg",
+			ARGUMENTS: "first-arg second-arg",
+			fetch_issue: "issue body text",
+		};
+		let captured: SpawnPiOptions | undefined;
+		const stubPi: SpawnPiFn = async (opts) => {
+			captured = opts;
+			return {
+				exitCode: 0,
+				finalText: "",
+				stderr: "",
+				aborted: false,
+				durationMs: 1,
+			};
+		};
+		await promptHandler(baseInput<PromptNode>({ node, spawnPi: stubPi, env }));
+		expect(captured?.env).toEqual(env);
+	});
+
 	test("forwards model / allowed_tools / systemPrompt / resumeSessionId to spawnPi", async () => {
 		const node: PromptNode = {
 			id: "x",
@@ -371,6 +398,31 @@ describe("commandHandler", () => {
 			}),
 		);
 		expect(captured?.prompt).toBe("Review PR #12 with priority urgent.");
+	});
+
+	test("forwards env (ARTIFACTS_DIR + upstream vars) to spawnPi", async () => {
+		// Same regression as the prompt-handler env test — command nodes also
+		// run as pi child processes and must see the procedure env.
+		const node: CommandNode = { id: "x", command: "review" };
+		const env = {
+			ARTIFACTS_DIR: "/runs/abc/artifacts",
+			BASE_BRANCH: "main",
+			scope: "PR #12",
+		};
+		let captured: SpawnPiOptions | undefined;
+		const stubPi: SpawnPiFn = async (opts) => {
+			captured = opts;
+			return { exitCode: 0, finalText: "", stderr: "", aborted: false, durationMs: 1 };
+		};
+		await commandHandler(
+			baseInput<CommandNode>({
+				node,
+				spawnPi: stubPi,
+				env,
+				resolveCommand: async () => "Review the scope.",
+			}),
+		);
+		expect(captured?.env).toEqual(env);
 	});
 });
 

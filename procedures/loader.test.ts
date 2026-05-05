@@ -221,6 +221,36 @@ nodes:
 		expect(result.warnings.some((w) => w.kind === "ai_fields_on_non_ai_node")).toBe(true);
 	});
 
+	test("output_format on a prompt node warns (Phase 1 doesn't honor structured output)", () => {
+		// Regression for the Codex review finding: `output_format` was missing
+		// from the ignored-capability list, so workflows that depend on
+		// structured-output dot access (`$nodeId.output.field`) ran with no
+		// warning and `--strict` did not refuse them.
+		const yaml = `
+name: structured
+description: uses output_format
+nodes:
+  - id: classify
+    prompt: classify the issue
+    output_format:
+      type: object
+      properties:
+        type:
+          type: string
+      required: [type]
+`;
+		const result = parseWorkflow(yaml, "structured.yaml");
+		expect(result.error).toBeNull();
+		expect(
+			result.warnings.some(
+				(w) =>
+					w.kind === "ignored_capability" &&
+					w.nodeId === "classify" &&
+					/output_format/.test(w.message),
+			),
+		).toBe(true);
+	});
+
 	test("script node is allowed but warned (Phase 1 not implemented)", () => {
 		const yaml = `
 name: scripty

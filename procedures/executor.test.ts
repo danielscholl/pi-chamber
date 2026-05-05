@@ -11,7 +11,7 @@ import * as os from "node:os";
 // @ts-ignore
 import * as path from "node:path";
 
-import { composeEnv, executeWorkflow } from "./executor.ts";
+import { composeEnv, defaultSpawnBash, executeWorkflow } from "./executor.ts";
 import { parseWorkflow } from "./loader.ts";
 import type { BashSpawnFn, SpawnPiFn } from "./nodes/index.ts";
 import type { NodeOutput, WorkflowDefinition } from "./schema/index.ts";
@@ -48,6 +48,52 @@ function stubPiAlwaysOk(textByPrompt: (prompt: string) => string = (p) => `echoe
 		durationMs: 0,
 	});
 }
+
+describe("defaultSpawnBash — timeout policy", () => {
+	// Regression for the Codex review finding: omitting `timeout:` on a bash
+	// node must NOT enforce a hidden default timer, since the README and
+	// handler comments document Archon-compatible "no timeout" behavior.
+	test("does not time out a long script when no timeoutMs is set", async () => {
+		const result = await defaultSpawnBash({
+			// `sleep 0.4` would have been killed by the prior 120s default, but
+			// we use a short sleep so the test stays fast. The point is: the
+			// timer should never fire when timeoutMs is undefined.
+			script: "sleep 0.2 && echo done",
+			cwd: process.cwd(),
+			env: {},
+		});
+		expect(result.timedOut).toBe(false);
+		expect(result.exitCode).toBe(0);
+		expect(result.stdout.trim()).toBe("done");
+	});
+
+	test("times out when an explicit timeoutMs is set and exceeded", async () => {
+		const result = await defaultSpawnBash({
+			script: "sleep 5",
+			cwd: process.cwd(),
+			env: {},
+			timeoutMs: 100,
+		});
+		// `timedOut` is the canonical signal (the executor uses it to compose
+		// the failure message). The shell's exit code on SIGTERM is
+		// platform-dependent, so we don't assert on it.
+		expect(result.timedOut).toBe(true);
+		expect(result.durationMs).toBeGreaterThanOrEqual(100);
+		expect(result.durationMs).toBeLessThan(3000);
+	});
+
+	test("completes normally within an explicit timeoutMs window", async () => {
+		const result = await defaultSpawnBash({
+			script: "echo quick",
+			cwd: process.cwd(),
+			env: {},
+			timeoutMs: 5000,
+		});
+		expect(result.timedOut).toBe(false);
+		expect(result.exitCode).toBe(0);
+		expect(result.stdout.trim()).toBe("quick");
+	});
+});
 
 describe("composeEnv", () => {
 	test("includes ARTIFACTS_DIR, BASE_BRANCH, positional args, ARGUMENTS", () => {

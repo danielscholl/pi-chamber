@@ -190,6 +190,14 @@ export interface SpawnPiOptions {
 	deniedTools?: string[];
 	systemPrompt?: string;
 	resumeSessionId?: string;
+	/**
+	 * Additional environment variables merged into `process.env` for the child
+	 * pi process. Procedure handlers should pass `NodeExecuteInput.env` here so
+	 * AI nodes that use tools (Bash, Write, etc.) inside the spawned pi see
+	 * `$ARTIFACTS_DIR`, `$BASE_BRANCH`, `$1..$9`, `$ARGUMENTS`, and
+	 * `$<upstreamId>` exactly like bash nodes do.
+	 */
+	env?: Record<string, string>;
 	signal?: AbortSignal;
 	killGraceMs?: number;
 	onDelta?: (delta: string) => void;
@@ -240,7 +248,7 @@ export async function spawnPiOnce(options: SpawnPiOptions): Promise<SpawnPiResul
 
 	const child = spawn(command, args, {
 		cwd: options.cwd,
-		env: process.env,
+		env: { ...process.env, ...(options.env ?? {}) },
 		stdio: ["ignore", "pipe", "pipe"],
 	}) as ReturnType<typeof spawn>;
 

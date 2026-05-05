@@ -68,8 +68,6 @@ import { checkTriggerRule } from "./triggers.ts";
 // Default spawn implementations
 // ---------------------------------------------------------------------------
 
-const DEFAULT_BASH_TIMEOUT_MS = 120_000;
-
 export const defaultSpawnPi: SpawnPiFn = (options) => spawnPiOnce(options);
 
 export const defaultSpawnBash: BashSpawnFn = async (
@@ -87,23 +85,30 @@ export const defaultSpawnBash: BashSpawnFn = async (
 	let stdout = "";
 	let stderr = "";
 
-	const timeoutMs = input.timeoutMs ?? DEFAULT_BASH_TIMEOUT_MS;
-	const timeoutHandle = setTimeout(() => {
-		timedOut = true;
-		try {
-			child.kill("SIGTERM");
-		} catch {
-			/* already dead */
-		}
-		setTimeout(() => {
+	// Bash nodes only get a timeout when the workflow author explicitly sets
+	// `timeout:`. Matches Archon's behavior — long-running setup, test, or E2E
+	// scripts must not be silently killed by a default the author never asked
+	// for. (Earlier revisions of this file enforced a 120s default; that was a
+	// footgun. See PR review.)
+	let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+	if (input.timeoutMs !== undefined) {
+		timeoutHandle = setTimeout(() => {
+			timedOut = true;
 			try {
-				child.kill("SIGKILL");
+				child.kill("SIGTERM");
 			} catch {
 				/* already dead */
 			}
-		}, 2000).unref?.();
-	}, timeoutMs);
-	timeoutHandle.unref?.();
+			setTimeout(() => {
+				try {
+					child.kill("SIGKILL");
+				} catch {
+					/* already dead */
+				}
+			}, 2000).unref?.();
+		}, input.timeoutMs);
+		timeoutHandle.unref?.();
+	}
 
 	const onAbort = () => {
 		aborted = true;
@@ -137,7 +142,7 @@ export const defaultSpawnBash: BashSpawnFn = async (
 			(code) => resolve(code ?? 0),
 		);
 	});
-	clearTimeout(timeoutHandle);
+	if (timeoutHandle) clearTimeout(timeoutHandle);
 	if (input.signal) input.signal.removeEventListener?.("abort", onAbort);
 
 	return {

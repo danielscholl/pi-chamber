@@ -79,7 +79,10 @@ export interface WorkflowLoadWarning {
  * cross-runtime portability.
  *
  * Worktree integration, hooks, sandbox, MCP, inline agents, betas, fallback
- * model, max-budget, and script nodes are tracked for Phase 2/3.
+ * model, max-budget, output-format JSON-schema validation, and script nodes
+ * are tracked for Phase 2/3 (issues #2 and #3). Until those land, the loader
+ * surfaces the warning and `--strict` refuses workflows that depend on them
+ * so users aren't silently misled by the README's compatibility table.
  */
 const PI_IGNORED_FIELDS_PER_NODE: readonly string[] = [
 	"hooks",
@@ -90,6 +93,7 @@ const PI_IGNORED_FIELDS_PER_NODE: readonly string[] = [
 	"maxBudgetUsd",
 	"mcp",
 	"skills",
+	"output_format",
 ];
 
 const PI_IGNORED_FIELDS_WORKFLOW: readonly string[] = [

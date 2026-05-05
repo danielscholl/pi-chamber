@@ -19,6 +19,7 @@ import type { NodeHandler } from "./types.ts";
 export const promptHandler: NodeHandler<PromptNode> = async ({
 	node,
 	cwd,
+	env,
 	workflowArgs,
 	upstreamOutputs,
 	signal,
@@ -32,6 +33,7 @@ export const promptHandler: NodeHandler<PromptNode> = async ({
 	const result = await spawnPi({
 		prompt: finalPrompt,
 		cwd,
+		env,
 		model: node.model,
 		allowedTools: node.allowed_tools,
 		deniedTools: node.denied_tools,

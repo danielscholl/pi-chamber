@@ -19,6 +19,7 @@ import type { NodeHandler } from "./types.ts";
 export const commandHandler: NodeHandler<CommandNode> = async ({
 	node,
 	cwd,
+	env,
 	workflowArgs,
 	upstreamOutputs,
 	signal,
@@ -46,6 +47,7 @@ export const commandHandler: NodeHandler<CommandNode> = async ({
 	const result = await spawnPi({
 		prompt: finalPrompt,
 		cwd,
+		env,
 		model: node.model,
 		allowedTools: node.allowed_tools,
 		deniedTools: node.denied_tools,
