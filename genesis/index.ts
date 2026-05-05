@@ -48,6 +48,16 @@ import {
 	resolveLensesRoot,
 	scaffoldNewspaper,
 } from "../observatory/core.ts";
+import { createTransientPanel } from "../shared/notice.ts";
+
+// Transient panel for the post-Genesis recap (paths + activation hints).
+// Replaces a top-of-screen toast so the multi-line summary lands above the
+// editor and auto-dismisses after a moment, mirroring assembly's pattern.
+const emitGenesisPanel = createTransientPanel({
+	widgetKey: "genesis-recap",
+	ttlMs: 12000,
+	placement: "aboveEditor",
+});
 
 const REQUEST_EXPIRATION_MS = 10 * 60 * 1000;
 
@@ -84,7 +94,6 @@ type GenesisAuthoringFields = {
 
 type GenesisAuthoringOptions = {
 	alreadyExistsLabel?: string;
-	startedMessage?: string;
 };
 
 type GenesisCommandContext = {
@@ -94,6 +103,11 @@ type GenesisCommandContext = {
 	ui: {
 		notify(message: string, type?: "info" | "warning" | "error"): void;
 		setStatus?(key: string, value: string): void;
+		setWidget?(
+			key: string,
+			content: string[] | undefined,
+			options?: { placement?: "aboveEditor" | "belowEditor" },
+		): void;
 	};
 };
 
@@ -270,7 +284,6 @@ export default function (
 			ctx,
 			{
 				alreadyExistsLabel: "Genesis starter",
-				startedMessage: `Authoring ${starter.name} (${starter.slug}).`,
 			},
 		);
 	}
@@ -371,11 +384,6 @@ export default function (
 		};
 		pending.set(request.requestId, request);
 
-		notify(
-			ctx,
-			options.startedMessage ?? `Authoring ${name} (${slug}).`,
-			"info",
-		);
 		const stopProgress = startGenesisProgress(ctx, slug);
 
 		let spawnResult: SpawnGenesisResult;
@@ -454,7 +462,7 @@ export default function (
 		}
 
 		setStatus(ctx, "genesis ready");
-		notify(ctx, completion.message, "info");
+		emitGenesisPanel(ctx, completion.message.split("\n"));
 	}
 
 	function completeGenesisRequest(params: GenesisWriteFilesParams) {
