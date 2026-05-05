@@ -4,12 +4,13 @@ import { existsSync } from "node:fs";
 // biome-ignore lint/suspicious/noTsIgnore: Project runtime provides Node built-ins.
 // @ts-ignore
 import path from "node:path";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import {
-	type GenesisConfig,
-	loadGenesisConfig,
-	slugify,
-} from "../genesis/core.ts";
+	ExtensionEditorComponent,
+	type ExtensionAPI,
+	type KeybindingsManager,
+} from "@mariozechner/pi-coding-agent";
+import type { TUI } from "@mariozechner/pi-tui";
+import { type GenesisConfig, loadGenesisConfig } from "../genesis/core.ts";
 import type {
 	AuthorMindFields,
 	AuthorMindOnceResult,
@@ -38,9 +39,43 @@ import {
 	writeSavedRoom,
 } from "../room/core.ts";
 import { mapWithConcurrencyLimit } from "../room/spawn.ts";
+import {
+	createTransientPanel,
+	notify,
+	startWorkingPanel,
+} from "../shared/notice.ts";
+import {
+	parseProposalFromToml,
+	serializeProposalToToml,
+} from "./proposal-toml.ts";
 
 export const ASSEMBLE_BATCH_CONCURRENCY = 3;
 export const ASSEMBLE_PROGRESS_WIDGET_KEY = "genesis-assemble-progress";
+export const ASSEMBLE_PANEL_WIDGET_KEY = "assembly-panel";
+
+// Transient panel for multi-line /assembly content: signals summary, the
+// team proposal preview during the confirmation loop, and the final
+// authoring recap. 60s TTL is a generous safety net — successive emits with
+// the same widgetKey replace prior content immediately, and exit paths
+// dismiss explicitly. The TTL only matters if the flow crashes silently.
+const emitAssemblyPanel = createTransientPanel({
+	widgetKey: ASSEMBLE_PANEL_WIDGET_KEY,
+	ttlMs: 60000,
+	placement: "aboveEditor",
+});
+
+// Phrases rotated through the working panel while the proposer subagent is
+// running. Loose-narrative ordering — "convening" first since the user just
+// triggered /assembly, then drifting toward the artifacts the proposer is
+// shaping. Order is loose; the widget rotates by elapsed time, not phase.
+const ASSEMBLE_PROGRESS_PHRASES = [
+	"convening casting",
+	"consulting the universe",
+	"drafting roster",
+	"weighing roles",
+	"naming faces",
+	"shaping rationale",
+] as const;
 
 export const ASSEMBLE_OPEN_FLOOR_DEFAULTS = {
 	maxTurns: 6,
@@ -72,6 +107,24 @@ export interface AssembleCommandContext {
 			content: string[] | undefined,
 			options?: { placement?: "aboveEditor" | "belowEditor" },
 		): void;
+		/**
+		 * Renders a custom focusable component (used for the proposal review
+		 * overlay). Mirrors pi-tui's ExtensionUIContext shape; we accept the
+		 * factory generically so the assembly layer doesn't have to import
+		 * pi-tui types directly.
+		 */
+		custom?<T>(
+			factory: (
+				tui: unknown,
+				theme: unknown,
+				keybindings: unknown,
+				done: (result: T) => void,
+			) => unknown,
+			options?: {
+				overlay?: boolean;
+				overlayOptions?: Record<string, unknown>;
+			},
+		): Promise<T>;
 	};
 	waitForIdle?(): Promise<void>;
 }
@@ -100,7 +153,7 @@ type SetWidgetFn = (
 ) => void;
 
 // ---------------------------------------------------------------------------
-// /genesis:assemble entry point
+// /assembly entry point
 // ---------------------------------------------------------------------------
 
 export async function runAssembleCommand(
@@ -111,7 +164,7 @@ export async function runAssembleCommand(
 	if (!ctx.hasUI) {
 		notify(
 			ctx,
-			"/genesis:assemble requires interactive UI. Run it from a Pi session with UI enabled.",
+			"/assembly requires interactive UI. Run it from a Pi session with UI enabled.",
 			"error",
 		);
 		return;
@@ -152,16 +205,53 @@ export async function runAssembleCommand(
 		!signals.claudeMd &&
 		!signals.manifest
 	) {
-		setStatus(ctx, "genesis ready");
-		notify(
-			ctx,
-			'No project description and no readable signals (README, AGENTS.md, CLAUDE.md, manifest). Try: /genesis:assemble "what you\'re building"',
-			"error",
-		);
-		return;
+		// Empty workspace + no description — prompt the user inline rather
+		// than hard-erroring. We prefer ctx.ui.custom so the wizard supports
+		// multi-line text + paste with preserved newlines (matters when
+		// users paste a structured prompt or a bullet list). Falls back to
+		// single-line ctx.ui.input for runtimes that don't expose custom
+		// overlays. Hard error if neither path is available.
+		setStatus(ctx, "assembling: awaiting description…");
+		const typed = await promptForDescription(ctx);
+		if (typed === null) {
+			// No UI path available — surface the original error so headless
+			// callers see the recourses spelled out.
+			setStatus(ctx, "genesis ready");
+			notify(ctx, renderEmptySignalsError(ctx.cwd), "error");
+			return;
+		}
+		if (!typed) {
+			setStatus(ctx, "genesis ready");
+			notify(ctx, "Assembly cancelled.", "info");
+			return;
+		}
+		// Re-run signal collection with the supplied description. The other
+		// signal fields are still empty, but the proposer has something to
+		// ground the proposal in.
+		try {
+			signals = collectRepoSignals(ctx.cwd, { description: typed });
+		} catch (error) {
+			setStatus(ctx, "genesis ready");
+			notify(
+				ctx,
+				`Repo signal collection failed: ${errorMessage(error)}`,
+				"error",
+			);
+			return;
+		}
 	}
 
-	notify(ctx, renderSignalsSummary(signals), "info");
+	// Animate the working panel during the proposer call. Spinner + rotating
+	// phrase + elapsed seconds in the header; compressed signals footer for
+	// context. Stops on success or error and clears the widget so the
+	// proposal panel takes over cleanly.
+	const stopProgress = startWorkingPanel(ctx, {
+		widgetKey: ASSEMBLE_PANEL_WIDGET_KEY,
+		label: "assembly",
+		phrases: ASSEMBLE_PROGRESS_PHRASES,
+		footer: [renderSignalsFooter(signals)],
+		placement: "aboveEditor",
+	});
 
 	setStatus(ctx, "assembling: convening casting…");
 	let proposal: AssembleProposal;
@@ -175,19 +265,19 @@ export async function runAssembleCommand(
 			deps.spawnSubagent,
 		);
 	} catch (error) {
+		stopProgress();
 		setStatus(ctx, "genesis ready");
 		notify(ctx, `Team proposer failed: ${errorMessage(error)}`, "error");
 		return;
 	}
 
-	const approved = await runConfirmationLoop(
-		proposal,
-		ctx,
-		signals,
-		args,
-		deps.spawnSubagent,
-	);
+	// Proposer returned. Stop the ticker (clears the widget) before the
+	// proposal panel takes over so the two views don't compete for the slot.
+	stopProgress();
+
+	const approved = await runConfirmationLoop(proposal, ctx);
 	if (!approved) {
+		emitAssemblyPanel(ctx, undefined);
 		setStatus(ctx, "genesis ready");
 		notify(ctx, "Team assembly cancelled. No files were written.", "info");
 		return;
@@ -197,6 +287,7 @@ export async function runAssembleCommand(
 	try {
 		validated = validateProposalForAuthoring(approved, ctx.cwd, config);
 	} catch (error) {
+		emitAssemblyPanel(ctx, undefined);
 		setStatus(ctx, "genesis ready");
 		notify(ctx, `Cannot author team: ${errorMessage(error)}`, "error");
 		return;
@@ -215,10 +306,9 @@ export async function runAssembleCommand(
 
 	if (succeeded.length === 0) {
 		setStatus(ctx, "genesis ready");
-		notify(
+		emitAssemblyPanel(
 			ctx,
 			renderAuthoringSummary(validated, succeeded, failed, undefined, undefined),
-			"error",
 		);
 		appendAssembleAudit(deps.pi, validated, {
 			succeeded: [],
@@ -261,10 +351,9 @@ export async function runAssembleCommand(
 	});
 
 	setStatus(ctx, "genesis ready");
-	notify(
+	emitAssemblyPanel(
 		ctx,
 		renderAuthoringSummary(validated, succeeded, failed, savedRoom, lensResult),
-		failed.length ? "warning" : "info",
 	);
 }
 
@@ -468,267 +557,96 @@ function isDefaultTeamSlugAvailable(cwd: string): boolean {
 // Confirmation loop UX
 // ---------------------------------------------------------------------------
 
+// Open the same ExtensionEditorComponent we use for the description prompt,
+// prefilled with the generated proposal serialized as TOML. The user edits
+// freely (paste, multi-line) and submits to author or cancels to abandon.
+// On parse/validation error we notify and reopen with their text intact so
+// no edits are lost.
 async function runConfirmationLoop(
 	initial: AssembleProposal,
 	ctx: AssembleCommandContext,
-	signals: RepoSignals,
-	args: AssembleArgs,
-	spawnSubagent: SpawnGenesisFn,
 ): Promise<AssembleProposal | undefined> {
-	let current: AssembleProposal = initial;
-	// Tracks fields the user has explicitly edited so they survive Regenerate.
-	// Locked fields are re-applied over each regenerated proposal, and the
-	// presence of any locked field suppresses the default-slug override.
-	const lockedMetadata: { team_slug?: string; team_name?: string } = {};
-	while (true) {
-		notify(ctx, renderProposal(current, signals), "info");
-		const select = ctx.ui.select;
-		if (!select) {
-			notify(
-				ctx,
-				"UI does not support select; cannot confirm proposal.",
-				"error",
-			);
-			return undefined;
-		}
-		const choice = await select.call(ctx.ui, "Team proposal:", [
-			"Approve and author",
-			"Drop a member",
-			"Edit a member",
-			"Edit team metadata",
-			"Regenerate",
-			"Cancel",
-		]);
-		if (!choice || choice === "Cancel") return undefined;
-		if (choice === "Approve and author") return current;
-
-		if (choice === "Drop a member") {
-			if (current.members.length <= 1) {
-				notify(
-					ctx,
-					"Cannot drop: team would be empty. Use Regenerate or Cancel instead.",
-					"warning",
-				);
-				continue;
-			}
-			const dropChoice = await select.call(
-				ctx.ui,
-				"Drop which member?",
-				current.members.map((m) => memberLabel(m)),
-			);
-			if (!dropChoice) continue;
-			const idx = current.members.findIndex(
-				(m) => memberLabel(m) === dropChoice,
-			);
-			if (idx >= 0) {
-				const dropped = current.members[idx];
-				current = {
-					...current,
-					members: current.members.filter((_, i) => i !== idx),
-				};
-				notify(ctx, `Dropped ${dropped.name} (${dropped.slug}).`, "info");
-			}
-			continue;
-		}
-
-		if (choice === "Edit a member") {
-			const memberChoice = await select.call(
-				ctx.ui,
-				"Edit which member?",
-				current.members.map((m) => memberLabel(m)),
-			);
-			if (!memberChoice) continue;
-			const idx = current.members.findIndex(
-				(m) => memberLabel(m) === memberChoice,
-			);
-			if (idx < 0) continue;
-			const fieldChoice = await select.call(ctx.ui, "Edit which field?", [
-				"name",
-				"role",
-				"voice",
-				"voiceDescription",
-				"Cancel",
-			]);
-			if (!fieldChoice || fieldChoice === "Cancel") continue;
-			const input = ctx.ui.input;
-			if (!input) {
-				notify(ctx, "UI does not support input; cannot edit fields.", "error");
-				continue;
-			}
-			const target = current.members[idx];
-			const placeholder =
-				(target as unknown as Record<string, string>)[fieldChoice] ?? "";
-			const value = (await input.call(
-				ctx.ui,
-				`New ${fieldChoice}:`,
-				placeholder,
-			))?.trim();
-			if (!value) {
-				notify(ctx, "No change made.", "info");
-				continue;
-			}
-			let updated: AssembleProposalMember = {
-				...target,
-				[fieldChoice]: value,
-			} as AssembleProposalMember;
-			if (fieldChoice === "name") {
-				const newSlug = slugify(value);
-				if (!newSlug) {
-					notify(
-						ctx,
-						"Name must contain ASCII letters or numbers.",
-						"warning",
-					);
-					continue;
-				}
-				const otherSlugs = new Set(
-					current.members.filter((_, i) => i !== idx).map((m) => m.slug),
-				);
-				const existingSet = new Set(
-					signals.existingMinds.map((m) => m.slug),
-				);
-				if (otherSlugs.has(newSlug)) {
-					notify(
-						ctx,
-						`Slug "${newSlug}" already used in this proposal.`,
-						"warning",
-					);
-					continue;
-				}
-				if (existingSet.has(newSlug)) {
-					notify(
-						ctx,
-						`Slug "${newSlug}" collides with an existing mind.`,
-						"warning",
-					);
-					continue;
-				}
-				updated = { ...updated, slug: newSlug };
-			}
-			const newMembers = current.members.slice();
-			newMembers[idx] = updated;
-			current = { ...current, members: newMembers };
-			notify(ctx, `Updated ${fieldChoice}.`, "info");
-			continue;
-		}
-
-		if (choice === "Edit team metadata") {
-			const fieldChoice = await select.call(ctx.ui, "Edit which?", [
-				"team name",
-				"team slug",
-				"Cancel",
-			]);
-			if (!fieldChoice || fieldChoice === "Cancel") continue;
-			const input = ctx.ui.input;
-			if (!input) {
-				notify(ctx, "UI does not support input; cannot edit team metadata.", "error");
-				continue;
-			}
-			if (fieldChoice === "team name") {
-				const value = (
-					await input.call(ctx.ui, "New team name:", current.team_name)
-				)?.trim();
-				if (!value) {
-					notify(ctx, "No change made.", "info");
-					continue;
-				}
-				current = { ...current, team_name: value };
-				lockedMetadata.team_name = value;
-				notify(ctx, "Updated team name.", "info");
-				continue;
-			}
-			// team slug
-			const value = (
-				await input.call(ctx.ui, "New team slug:", current.team_slug)
-			)?.trim();
-			if (!value) {
-				notify(ctx, "No change made.", "info");
-				continue;
-			}
-			const newSlug = slugify(value);
-			if (!newSlug) {
-				notify(
-					ctx,
-					"Slug must contain ASCII letters or numbers.",
-					"warning",
-				);
-				continue;
-			}
-			if (newSlug === current.team_slug) {
-				notify(ctx, "Slug unchanged.", "info");
-				continue;
-			}
-			try {
-				const { roomDir } = resolveSavedRoomPaths(ctx.cwd, newSlug);
-				if (existsSync(roomDir)) {
-					notify(
-						ctx,
-						`Slug "${newSlug}" already exists as a saved room.`,
-						"warning",
-					);
-					continue;
-				}
-			} catch (error) {
-				notify(ctx, errorMessage(error), "warning");
-				continue;
-			}
-			if (current.members.some((m) => m.slug === newSlug)) {
-				notify(
-					ctx,
-					`Slug "${newSlug}" collides with a proposed member slug.`,
-					"warning",
-				);
-				continue;
-			}
-			current = { ...current, team_slug: newSlug };
-			lockedMetadata.team_slug = newSlug;
-			notify(ctx, "Updated team slug.", "info");
-			continue;
-		}
-
-		if (choice === "Regenerate") {
-			const input = ctx.ui.input;
-			const feedback = input
-				? (
-						await input.call(
-							ctx.ui,
-							"What should the next proposal do differently? (Enter to skip)",
-							"",
-						)
-					)?.trim()
-				: "";
-			setStatus(ctx, "assembling: regenerating…");
-			const hasLockedMetadata =
-				lockedMetadata.team_slug !== undefined ||
-				lockedMetadata.team_name !== undefined;
-			try {
-				let next = await proposeTeam(
-					signals,
-					args,
-					feedback || undefined,
-					current,
-					ctx.cwd,
-					spawnSubagent,
-					{ lockMetadata: hasLockedMetadata },
-				);
-				if (lockedMetadata.team_slug) {
-					next = { ...next, team_slug: lockedMetadata.team_slug };
-				}
-				if (lockedMetadata.team_name) {
-					next = { ...next, team_name: lockedMetadata.team_name };
-				}
-				current = next;
-			} catch (error) {
-				notify(ctx, `Regenerate failed: ${errorMessage(error)}`, "error");
-			}
-			setStatus(ctx, "assembling: ready");
-			continue;
-		}
+	const customRender = ctx.ui.custom;
+	if (!customRender) {
+		notify(
+			ctx,
+			"UI does not support overlays; cannot review proposal.",
+			"error",
+		);
+		return undefined;
 	}
-}
 
-function memberLabel(m: AssembleProposalMember): string {
-	return `${m.name} (${m.slug}) — ${m.role}`;
+	let prefill = serializeProposalToToml(initial);
+	while (true) {
+		const submitted = await customRender<string | undefined>(
+			(tui, _theme, keybindings, done) => {
+				let settled = false;
+				const finish = (result: string | undefined) => {
+					if (settled) return;
+					settled = true;
+					done(result);
+				};
+				const editor = new ExtensionEditorComponent(
+					tui as TUI,
+					keybindings as KeybindingsManager,
+					"Review proposal — edit and submit, or esc to cancel",
+					prefill,
+					(text) => finish(text),
+					() => finish(undefined),
+				);
+				const c = editor.children;
+				editor.children = [c[0], c[2], c[4], c[c.length - 1]];
+				// pi-tui's Editor caps its visible viewport at 30% of
+				// terminal.rows (editor.js, hardcoded). For a 30-50 line TOML
+				// proposal that's only ~10-15 visible lines and the rest of
+				// the 95% overlay is empty padding. Proxy the inner editor's
+				// `tui.terminal.rows` to report 2.5x the real value — that
+				// brings the effective cap to ~75% of the real terminal,
+				// leaving room inside the 95% overlay for the title, both
+				// borders, and the editor's own top/bottom rule lines.
+				const innerEditor = c[4] as { tui?: TUI };
+				if (innerEditor.tui) {
+					const realTui = innerEditor.tui;
+					innerEditor.tui = new Proxy(realTui, {
+						get(target, prop, receiver) {
+							if (prop === "terminal") {
+								const t = (target as { terminal: object }).terminal;
+								return new Proxy(t, {
+									get(inner, p) {
+										if (p === "rows") {
+											const real = Reflect.get(inner, p);
+											return typeof real === "number"
+												? Math.floor(real * 2.5)
+												: 60;
+										}
+										return Reflect.get(inner, p);
+									},
+								});
+							}
+							return Reflect.get(target, prop, receiver);
+						},
+					}) as TUI;
+				}
+				return editor;
+			},
+			{
+				// Proposal TOML is long (~30-50 lines); render as a near-fullscreen
+				// centered overlay instead of inline so the user can see the whole
+				// thing without scrolling.
+				overlay: true,
+				overlayOptions: {
+					anchor: "center",
+					width: "95%",
+					maxHeight: "95%",
+				},
+			},
+		);
+		if (submitted === undefined) return undefined;
+		const parsed = parseProposalFromToml(submitted);
+		if (parsed.ok) return parsed.proposal;
+		notify(ctx, `Proposal invalid: ${parsed.error}`, "error");
+		prefill = submitted;
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -780,6 +698,32 @@ export function validateProposalForAuthoring(
 // Batch authoring
 // ---------------------------------------------------------------------------
 
+// Spinner + phrase pair mirrors /genesis's startGenesisProgress so the team
+// authoring view feels of-a-piece with single-mind authoring. /assembly
+// runs N copies of /genesis under the hood; surfacing the same animation
+// per row makes that lineage obvious to the operator.
+const AUTHORING_SPINNER_FRAMES = [
+	"⠋",
+	"⠙",
+	"⠹",
+	"⠸",
+	"⠼",
+	"⠴",
+	"⠦",
+	"⠧",
+	"⠇",
+	"⠏",
+] as const;
+const AUTHORING_BIRTH_PHRASES = [
+	"drafting soul",
+	"writing memory",
+	"encoding rules",
+	"indexing knowledge",
+	"awaiting genesis",
+] as const;
+const AUTHORING_FRAME_INTERVAL_MS = 120;
+const AUTHORING_PHRASE_INTERVAL_MS = 1800;
+
 async function authorTeamMembers(
 	proposal: AssembleProposal,
 	ctx: AssembleCommandContext,
@@ -789,25 +733,52 @@ async function authorTeamMembers(
 	const total = proposal.members.length;
 	const states: Array<"queued" | "running" | "done" | "failed"> = new Array(total).fill("queued");
 	const elapsed: number[] = new Array(total).fill(0);
+	const startedAt: Array<number | undefined> = new Array(total).fill(undefined);
+	let frame = 0;
 
 	const setWidget = (ctx.ui as { setWidget?: SetWidgetFn }).setWidget;
+
 	const renderProgress = () => {
+		const spinner =
+			AUTHORING_SPINNER_FRAMES[frame % AUTHORING_SPINNER_FRAMES.length] ??
+			"·";
 		const lines = ["assembling team:"];
 		for (let i = 0; i < total; i++) {
 			const m = proposal.members[i];
 			const status = states[i];
-			const tag =
-				status === "done"
-					? `done ${(elapsed[i] / 1000).toFixed(1)}s`
-					: status === "failed"
-						? "failed"
-						: status === "running"
-							? "…"
-							: "queued";
-			lines.push(`  [${tag}] ${m.name} (${m.slug}) — ${m.role}`);
+			let glyph: string;
+			let tail: string;
+			if (status === "done") {
+				glyph = "✓";
+				tail = `${(elapsed[i] / 1000).toFixed(1)}s`;
+			} else if (status === "failed") {
+				glyph = "✕";
+				tail = "failed";
+			} else if (status === "running") {
+				glyph = spinner;
+				const since =
+					startedAt[i] !== undefined
+						? Math.floor((Date.now() - (startedAt[i] ?? 0)) / 1000)
+						: 0;
+				const phraseIndex =
+					Math.floor(
+						(Date.now() - (startedAt[i] ?? Date.now())) /
+							AUTHORING_PHRASE_INTERVAL_MS,
+					) % AUTHORING_BIRTH_PHRASES.length;
+				const phrase =
+					AUTHORING_BIRTH_PHRASES[phraseIndex] ?? "drafting soul";
+				tail = `${phrase}… ${since}s`;
+			} else {
+				glyph = "◌";
+				tail = "queued";
+			}
+			lines.push(
+				`  ${glyph} ${m.name} (${m.slug}) — ${m.role}  ${tail}`,
+			);
 		}
 		return lines;
 	};
+
 	const updateWidget = () => {
 		if (typeof setWidget !== "function") return;
 		try {
@@ -818,43 +789,71 @@ async function authorTeamMembers(
 			/* widget updates are best-effort */
 		}
 	};
-	updateWidget();
 
-	const results = await mapWithConcurrencyLimit(
-		proposal.members,
-		ASSEMBLE_BATCH_CONCURRENCY,
-		async (member, idx): Promise<MemberAuthoringResult> => {
-			states[idx] = "running";
+	// Frame ticker keeps the spinner moving and the elapsed counter ticking
+	// while members are running. We don't gate it on "any running" — it's
+	// cheap and the per-row glyph picks the right state. unref() so a long
+	// tick doesn't keep the process alive on shutdown.
+	let ticker: ReturnType<typeof setInterval> | undefined;
+	const startTicker = () => {
+		if (ticker || typeof setWidget !== "function") return;
+		ticker = setInterval(() => {
+			frame += 1;
 			updateWidget();
-			const startedAt = Date.now();
-			let result: AuthorMindOnceResult;
-			try {
-				result = await authorMind(
-					{
-						name: member.name,
-						role: member.role,
-						voice: member.voice,
-						voiceDescription: member.voiceDescription,
+		}, AUTHORING_FRAME_INTERVAL_MS);
+		(ticker as { unref?: () => void }).unref?.();
+	};
+	const stopTicker = () => {
+		if (ticker) {
+			clearInterval(ticker);
+			ticker = undefined;
+		}
+	};
+
+	updateWidget();
+	startTicker();
+
+	let results: MemberAuthoringResult[];
+	try {
+		results = await mapWithConcurrencyLimit(
+			proposal.members,
+			ASSEMBLE_BATCH_CONCURRENCY,
+			async (member, idx): Promise<MemberAuthoringResult> => {
+				states[idx] = "running";
+				startedAt[idx] = Date.now();
+				updateWidget();
+				const memberStartedAt = Date.now();
+				let result: AuthorMindOnceResult;
+				try {
+					result = await authorMind(
+						{
+							name: member.name,
+							role: member.role,
+							voice: member.voice,
+							voiceDescription: member.voiceDescription,
+							slug: member.slug,
+							source: `assemble:${proposal.team_slug}`,
+						},
+						config,
+						ctx.cwd,
+					);
+				} catch (error) {
+					result = {
+						ok: false,
 						slug: member.slug,
-						source: `assemble:${proposal.team_slug}`,
-					},
-					config,
-					ctx.cwd,
-				);
-			} catch (error) {
-				result = {
-					ok: false,
-					slug: member.slug,
-					error: errorMessage(error),
-					durationMs: Date.now() - startedAt,
-				};
-			}
-			elapsed[idx] = result.durationMs;
-			states[idx] = result.ok ? "done" : "failed";
-			updateWidget();
-			return { member, result };
-		},
-	);
+						error: errorMessage(error),
+						durationMs: Date.now() - memberStartedAt,
+					};
+				}
+				elapsed[idx] = result.durationMs;
+				states[idx] = result.ok ? "done" : "failed";
+				updateWidget();
+				return { member, result };
+			},
+		);
+	} finally {
+		stopTicker();
+	}
 
 	if (typeof setWidget === "function") {
 		try {
@@ -930,64 +929,39 @@ function appendAssembleAudit(
 // Rendering helpers
 // ---------------------------------------------------------------------------
 
-function renderSignalsSummary(signals: RepoSignals): string {
-	const lines: string[] = ["Reading project signals"];
-	if (signals.description) {
-		lines.push(`  description: ${truncate(signals.description, 100)}`);
-	}
-	if (signals.readme) {
-		lines.push(
-			`  README.md (${signals.readme.content.length} chars${signals.readme.truncated ? ", truncated" : ""})`,
-		);
-	}
-	if (signals.agentsMd) {
-		lines.push(
-			`  AGENTS.md (${signals.agentsMd.content.length} chars${signals.agentsMd.truncated ? ", truncated" : ""})`,
-		);
-	}
-	if (signals.claudeMd) {
-		lines.push(
-			`  CLAUDE.md (${signals.claudeMd.content.length} chars${signals.claudeMd.truncated ? ", truncated" : ""})`,
-		);
-	}
-	if (signals.manifest) {
-		lines.push(
-			`  ${signals.manifest.kind} (${signals.manifest.content.length} chars${signals.manifest.truncated ? ", truncated" : ""})`,
-		);
-	}
-	lines.push(
-		`  top-level dirs: ${signals.topLevelDirs.length ? signals.topLevelDirs.join(", ") : "(none)"}`,
-	);
-	lines.push(
-		`  existing minds: ${signals.existingMinds.length}${signals.existingMinds.length ? ` (${signals.existingMinds.map((m) => m.slug).join(", ")})` : ""}`,
-	);
-	return lines.join("\n");
+// Built when the signal scan returned nothing usable. Surfaces the cwd Pi
+// actually scanned so the operator can tell "wrong directory" apart from a
+// genuine missing-files case, and lists the recourse paths inline.
+function renderEmptySignalsError(cwd: string): string {
+	return [
+		`No project description and no readable signals in ${cwd}.`,
+		"Looked for: README.md, AGENTS.md, CLAUDE.md, or a manifest (package.json, pyproject.toml, go.mod, Cargo.toml, pom.xml, build.gradle[.kts], Gemfile, composer.json).",
+		'Either run /assembly from the project root, or pass a description: /assembly "what you\'re building".',
+	].join(" ");
 }
 
-function renderProposal(
-	proposal: AssembleProposal,
-	signals: RepoSignals,
-): string {
-	const lines: string[] = [];
-	lines.push(`TEAM PROPOSAL — ${proposal.team_name} (${proposal.universe})`);
-	lines.push(`  team slug: ${proposal.team_slug}`);
-	lines.push(`  project:   ${proposal.project}`);
-	lines.push(`  rationale: ${proposal.rationale}`);
-	lines.push("");
-	for (let i = 0; i < proposal.members.length; i++) {
-		const m = proposal.members[i];
-		lines.push(`  ${i + 1}. ${m.name}  ·  ${m.slug}  ·  ${m.role}`);
-		lines.push(`     voice: ${m.voice}`);
-		lines.push(`     ${m.voiceDescription}`);
-		if (m.rationale) lines.push(`     why: ${m.rationale}`);
+// One-line signal recap shown as the static footer beneath the working
+// panel's animated header during the proposer wait. Same data as
+// renderSignalsSummary but compressed onto a single line so it doesn't
+// crowd the spinner.
+function renderSignalsFooter(signals: RepoSignals): string {
+	const parts: string[] = [];
+	if (signals.description) {
+		parts.push(`description: ${truncate(signals.description, 60)}`);
+	}
+	if (signals.readme) parts.push("README.md");
+	if (signals.agentsMd) parts.push("AGENTS.md");
+	if (signals.claudeMd) parts.push("CLAUDE.md");
+	if (signals.manifest) parts.push(signals.manifest.kind);
+	if (signals.topLevelDirs.length > 0) {
+		parts.push(`top-level dirs: ${signals.topLevelDirs.length}`);
 	}
 	if (signals.existingMinds.length > 0) {
-		lines.push("");
-		lines.push(
-			`existing preserved: ${signals.existingMinds.map((e) => e.slug).join(", ")}`,
+		parts.push(
+			`existing minds: ${signals.existingMinds.length} (${signals.existingMinds.map((m) => m.slug).join(", ")})`,
 		);
 	}
-	return lines.join("\n");
+	return parts.length ? parts.join(" · ") : "(no signals)";
 }
 
 function renderAuthoringSummary(
@@ -996,9 +970,12 @@ function renderAuthoringSummary(
 	failed: MemberAuthoringResult[],
 	savedRoom: SavedRoom | undefined,
 	lens: { lensSlug: string; created: boolean } | undefined,
-): string {
+): string[] {
 	const lines: string[] = [];
-	lines.push("TEAM ASSEMBLED");
+	// Header carries severity. When nothing was authored, "ASSEMBLED" would be
+	// misleading; surface "FAILED" so the panel header alone communicates the
+	// outcome without needing a parallel error toast.
+	lines.push(succeeded.length === 0 ? "TEAM ASSEMBLY FAILED" : "TEAM ASSEMBLED");
 	lines.push(
 		`  authored: ${succeeded.length}${succeeded.length ? ` (${succeeded.map((s) => s.member.slug).join(", ")})` : ""}`,
 	);
@@ -1025,24 +1002,12 @@ function renderAuthoringSummary(
 		}
 		lines.push("  /observatory");
 	}
-	return lines.join("\n");
+	return lines;
 }
 
 function truncate(s: string, max: number): string {
 	if (s.length <= max) return s;
 	return `${s.slice(0, max - 1)}…`;
-}
-
-function notify(
-	ctx: AssembleCommandContext,
-	message: string,
-	type: "info" | "warning" | "error" = "info",
-): void {
-	if (ctx.hasUI) {
-		ctx.ui.notify(message, type);
-		return;
-	}
-	if (type === "error") throw new Error(message);
 }
 
 function setStatus(ctx: AssembleCommandContext, value: string): void {
@@ -1058,4 +1023,56 @@ function setStatus(ctx: AssembleCommandContext, value: string): void {
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+// Returns the trimmed description, or undefined if the user cancelled.
+// Returns null when no UI path is available — caller surfaces the
+// renderEmptySignalsError fallback.
+async function promptForDescription(
+	ctx: AssembleCommandContext,
+): Promise<string | undefined | null> {
+	const customRender = ctx.ui.custom;
+	if (customRender) {
+		const typed = await customRender<string | undefined>(
+			(tui, _theme, keybindings, done) => {
+				let settled = false;
+				const finish = (result: string | undefined) => {
+					if (settled) return;
+					settled = true;
+					done(result);
+				};
+				const editor = new ExtensionEditorComponent(
+					tui as TUI,
+					keybindings as KeybindingsManager,
+					"What are you building?",
+					undefined,
+					(text) => finish(text.trim() || undefined),
+					() => finish(undefined),
+				);
+				// ExtensionEditorComponent's default chrome is:
+				//   [border, spacer, title, spacer, editor, spacer, hint, spacer, border]
+				// For the empty-signals prompt we want a tight chat-style
+				// input: keep the borders + title + editor; drop the four
+				// spacers and the hint footer (Enter/Shift+Enter/Esc behave
+				// the way users expect from any chat input).
+				const c = editor.children;
+				editor.children = [c[0], c[2], c[4], c[c.length - 1]];
+				return editor;
+			},
+			{ overlay: false },
+		);
+		return typed?.trim() || undefined;
+	}
+	const inputFn = ctx.ui.input;
+	if (inputFn) {
+		const typed = (
+			await inputFn.call(
+				ctx.ui,
+				"What are you building? (esc to cancel)",
+				"",
+			)
+		)?.trim();
+		return typed || undefined;
+	}
+	return null;
 }

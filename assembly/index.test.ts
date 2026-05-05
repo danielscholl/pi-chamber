@@ -18,6 +18,7 @@ import type {
 	SpawnGenesisOptions,
 	SpawnGenesisResult,
 } from "../genesis/spawn.ts";
+import { serializeProposalToToml } from "./proposal-toml.ts";
 
 async function withTempProject<T>(
 	fn: (cwd: string) => Promise<T> | T,
@@ -49,12 +50,36 @@ interface TestContext {
 			content: string[] | undefined,
 			options?: { placement?: "aboveEditor" | "belowEditor" },
 		): void;
+		custom<T>(
+			factory: (
+				tui: unknown,
+				theme: unknown,
+				keybindings: unknown,
+				done: (result: T) => void,
+			) => unknown,
+			options?: { overlay?: boolean },
+		): Promise<T>;
 	};
 	waitForIdle(): Promise<void>;
 }
 
-function createContext(cwd: string): TestContext {
+interface CreateContextOptions {
+	/**
+	 * Queue returned from ctx.ui.custom() in order. Each editor opening
+	 * (description prompt, proposal review) consumes one item. Pass undefined
+	 * to simulate Esc-cancel; pass a TOML string to simulate submit. Defaults
+	 * to a single undefined (cancel) so legacy tests that don't care about
+	 * the editor still work.
+	 */
+	editorResults?: Array<string | undefined>;
+}
+
+function createContext(
+	cwd: string,
+	opts: CreateContextOptions = {},
+): TestContext {
 	const notifications: TestNotification[] = [];
+	const editorQueue = [...(opts.editorResults ?? [undefined])];
 	return {
 		cwd,
 		hasUI: true,
@@ -71,6 +96,14 @@ function createContext(cwd: string): TestContext {
 			},
 			setStatus() {},
 			setWidget() {},
+			async custom<T>(): Promise<T> {
+				if (editorQueue.length === 0) {
+					throw new Error(
+						"editorResults queue exhausted: ctx.ui.custom() called more times than expected.",
+					);
+				}
+				return editorQueue.shift() as unknown as T;
+			},
 		},
 		async waitForIdle() {},
 	};
@@ -267,7 +300,10 @@ describe("/assembly command registration", () => {
 			};
 
 			const harness = createHarness(spawn);
-			const ctx = createContext(cwd);
+			// Simulate the user submitting the prefilled proposal unchanged.
+			const ctx = createContext(cwd, {
+				editorResults: [serializeProposalToToml(proposalPayload)],
+			});
 			await harness.commands
 				.get("assembly")
 				?.handler("describe me", ctx);

@@ -30,6 +30,7 @@
     "room/**",
     "observatory/**",
     "assembly/**",
+    "procedures/**",
     "shared/**",
     "dist/**",
     "README.md",
@@ -44,7 +45,8 @@
     "check": "bun run typecheck && bun test && bun run build"
   },
   "dependencies": {
-    "typebox": "^1.1.24"
+    "typebox": "^1.1.24",
+    "zod": "^3.25.28"
   },
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": "*",
@@ -70,7 +72,8 @@
       "./mind/index.ts",
       "./room/index.ts",
       "./observatory/index.ts",
-      "./assembly/index.ts"
+      "./assembly/index.ts",
+      "./procedures/index.ts"
     ]
   }
 }

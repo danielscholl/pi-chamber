@@ -1,6 +1,6 @@
 # pi-chamber — Agent Instructions
 
-This repo is a **Pi extension package** that ships five composable features (genesis, mind, room, observatory, assembly). It is consumed by Pi workspaces either via `npm:pi-chamber` or via relative paths during local development.
+This repo is a **Pi extension package** that ships six composable features (genesis, mind, room, observatory, assembly, procedures). It is consumed by Pi workspaces either via `npm:pi-chamber` or via relative paths during local development.
 
 For user-facing context, read `README.md`. This file is the operational contract for coding agents working in this repo.
 
@@ -50,7 +50,25 @@ assembly/core.ts             # orchestration: arg parsing, propose, confirm loop
 assembly/prompts.ts          # team proposal prompt builder + strict JSON parser
 assembly/signals.ts          # bounded repo signal collector (README, AGENTS, CLAUDE, manifest, dirs, existing minds)
 
+procedures/index.ts          # /procedures extension entry; subcommand router (run/list/show/status/halt)
+procedures/core.ts           # path resolution, discovery wrappers, arg parsing, command-file resolution
+procedures/loader.ts         # YAML parse + Zod validate + warning channel; calls validateDagShape
+procedures/executor.ts       # layered DAG run loop; spawn dispatch; persistence + event emission
+procedures/store.ts          # filesystem-backed run state under .pi/procedures/runs/<id>/
+procedures/spawn.ts          # minimal child-pi spawn helper (slimmed from room/spawn.ts; duplicated, not imported)
+procedures/conditions.ts     # `when:` expression evaluator (ported from Archon, pure)
+procedures/triggers.ts       # checkTriggerRule (ported from Archon, pure)
+procedures/graph.ts          # buildTopologicalLayers + validateDagShape (ported from Archon, pure)
+procedures/substitute.ts     # $ARGUMENTS / $1..$9 / $nodeId.output[.field] substitution (ported from Archon, pure)
+procedures/prompts.ts        # canned message strings for the slash command surface
+procedures/ui.ts             # working-panel + per-node notify wrapper for run progress
+procedures/nodes/            # one file per node-type handler; dispatched via selectHandler
+procedures/schema/           # vendored Archon Zod schemas; sync sha in ARCHON_VERSION.md
+procedures/defaults/         # bundled example workflows (hello-world, status-report, classify-changes)
+procedures/test-fixtures/    # vendored Archon default workflows for the loader conformance test
+
 shared/session-exit.ts       # shared /exit command coordinator (mind + room)
+shared/notice.ts             # toast / transient panel / working-panel primitives (used by assembly + procedures)
 ```
 
 ## Genesis mind orchestration
@@ -159,6 +177,21 @@ Do not bypass Genesis authoring rules. Live `/genesis` requests run in a child P
 - Adjourn uses the genesis-side primitive `removeMindOnce(slug, cwd, config, appendEntry)` for per-mind teardown. `removeNewspaperLens` and `removeTeamStatusBoard` in `observatory/core.ts` are the lens inverses. Don't add ad-hoc removal paths.
 - Keep deterministic logic split across pure modules with Bun tests: `assembly/signals.ts` (signal collection), `assembly/prompts.ts` (proposal prompt builder + parser), `assembly/core.ts` (orchestration helpers like `parseAssembleArgs`, `validateProposalForAuthoring`), `assembly/adjourn.ts` (teardown orchestration).
 - Audit entries: `genesis-assemble` stream gets one entry per convene (`action: "assemble"` implicit) and one per adjourn (`action: "adjourn"`). The `genesis` stream gets one entry per mind authored (no `action` field for backward compat) and one per mind removed (`action: "remove"`). Do not double-audit.
+
+## Procedures rules
+
+- `/procedures` is a runtime for **Archon-compatible workflow YAMLs** — the schema is vendored under `procedures/schema/` and the conformance test (`procedures/loader.conformance.test.ts`) loads representative Archon defaults to detect drift. When upstream Archon ships a schema change, re-sync per `procedures/schema/ARCHON_VERSION.md`; do not let the schemas diverge silently.
+- The runtime is intentionally narrower than Archon's. Phase 1 honors prompt + command + bash + cancel nodes plus DAG controls (`depends_on`, `when:`, `trigger_rule`); loop / approval / script nodes parse but throw a Phase-1 message at execution. Hook / agent / sandbox / MCP / `output_format` / `betas` / `fallbackModel` / `maxBudgetUsd` / `mutates_checkout` / `additionalDirectories` fields parse and warn — they do **not** alter execution. `--strict` on `/procedures run` hard-fails when any "ignored" field is present.
+- Provider scope: only `provider: claude` (or omitted) is accepted at load. `provider: codex` errors with a "not supported in Phase 1" message. Do not silently fall back to claude.
+- Discovery roots in precedence order (later overrides earlier on name collisions): bundled defaults → `~/.pi/procedures/` (global) → `<repo>/.pi/procedures/` (project) → `<repo>/.archon/workflows/` (zero-config Archon reuse). Discovery is filename-blind to extension other than `.yaml` / `.yml`.
+- Run state lives at `.pi/procedures/runs/<id>/`: `run.json` (status + metadata), `events.ndjson` (append-only), `nodes/<id>.{json,txt}` (per-node NodeOutput + raw text), `artifacts/` (= `$ARTIFACTS_DIR` for the run). The `.txt` mirror is for human inspection only — schema reads come from `.json`. Sanitize node ids (`[^\w.-]` → `_`) before composing on-disk paths.
+- Session threading mirrors Archon: in a sequential single-node layer, the prior layer's session id is forwarded as `--resume <id>` for `context !== 'fresh'` AI nodes. Parallel layers (>1 node) reset the threaded session because two nodes can't share one. Do not invent additional threading rules.
+- `command:` nodes are bring-your-own. Resolution walks `<cwd>/.pi/commands/<name>.{md,prompt.md}` then `<cwd>/.archon/commands/<name>.{md,prompt.md}`. Missing-command failure prints the bring-your-own message — do not auto-fall-back to a stub prompt.
+- Keep deterministic logic split per the per-feature rule: pure ports (`conditions.ts`, `triggers.ts`, `graph.ts`, `substitute.ts`) carry no Pi runtime coupling and are tested standalone. The loader (`loader.ts`), store (`store.ts`), and core (`core.ts`) are filesystem-only. Spawn (`spawn.ts`) is the only file that talks to child processes. The executor (`executor.ts`) wires them together; the slash-command index (`index.ts`) is the seam between the runtime and Pi's UI.
+- Per the per-feature isolation rule, `procedures/spawn.ts` is a slimmed copy of `room/spawn.ts` rather than an import. Same convention as `genesis/spawn.ts`. If a meaningful shared utility emerges, propose moving it to `shared/` rather than cross-importing between feature folders.
+- The vendored schemas keep upstream's 2-space indentation so re-syncs are clean text diffs. All other procedures files use tabs (chamber convention).
+- Audit: there is no audit stream for procedures yet. Run state under `.pi/procedures/runs/<id>/` is the source of truth. Do not add a `pi.appendEntry("procedures", ...)` stream without a clear consumer.
+- Bundled defaults under `procedures/defaults/` must parse with zero loader warnings — `procedures/defaults.test.ts` enforces this. Keep them simple Phase-1 examples; if a default needs a Phase-2 feature, defer the default until the feature lands.
 
 ## Coding conventions
 

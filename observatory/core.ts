@@ -528,7 +528,7 @@ function titleCase(slug: string): string {
 // ---------------------------------------------------------------------------
 // Team status-board scaffolding
 //
-// Used by /genesis:assemble to scaffold a status-board lens that summarizes
+// Used by /assembly to scaffold a status-board lens that summarizes
 // the assembled team. Sibling to scaffoldNewspaper; same idempotency contract:
 // if either lens.json or the data file already exists, returns
 // `created: false` without overwriting.
@@ -563,7 +563,7 @@ export function teamLensManifest(teamSlug: string): {
 		kind: "status-board",
 		source: "data.json",
 		icon: "users",
-		description: `Team roster authored by /genesis:assemble for ${teamSlug}.`,
+		description: `Team roster authored by /assembly for ${teamSlug}.`,
 	};
 }
 
