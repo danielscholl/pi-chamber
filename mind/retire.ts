@@ -15,6 +15,16 @@ import {
 	type SavedRoomSummary,
 } from "../room/core.ts";
 import { listGenesisMinds, normalizeMindSlug } from "./core.ts";
+import { createTransientPanel } from "../shared/notice.ts";
+
+// Transient panel for the retire success summary. Mirrors genesis-recap:
+// lands above the editor and auto-dismisses after a moment so the operator
+// gets confirmation without persistent toast clutter.
+const emitRetirePanel = createTransientPanel({
+	widgetKey: "mind-retire-recap",
+	ttlMs: 12000,
+	placement: "aboveEditor",
+});
 
 export interface MindRetireArgs {
 	slug?: string;
@@ -27,6 +37,11 @@ export interface MindRetireCommandContext {
 		notify(message: string, type?: "info" | "warning" | "error"): void;
 		select?(prompt: string, options: string[]): Promise<string | undefined>;
 		setStatus?(key: string, value: string | undefined): void;
+		setWidget?(
+			key: string,
+			content: string[] | undefined,
+			options?: { placement?: "aboveEditor" | "belowEditor" },
+		): void;
 	};
 }
 
@@ -130,11 +145,11 @@ export async function runRetireCommand(
 	);
 
 	setStatus(ctx, undefined);
-	notify(
-		ctx,
-		renderRetireSummary(targetSlug, result),
-		result.ok ? "info" : "error",
-	);
+	if (result.ok) {
+		emitRetirePanel(ctx, renderRetireSuccessLines(targetSlug, result));
+	} else {
+		notify(ctx, renderRetireFailure(targetSlug, result), "error");
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -245,13 +260,10 @@ function renderBlockedByRooms(
 	return lines.join("\n");
 }
 
-function renderRetireSummary(
+function renderRetireSuccessLines(
 	slug: string,
 	result: RemoveMindOnceResult,
-): string {
-	if (!result.ok) {
-		return `Retire failed for "${slug}": ${result.error ?? "unknown error"}`;
-	}
+): string[] {
 	const removed: string[] = [];
 	if (result.removed.mind) removed.push("mind directory");
 	if (result.removed.shim) removed.push("shim");
@@ -265,7 +277,14 @@ function renderRetireSummary(
 	if (result.newspaperError) {
 		lines.push(`  lens warning: ${result.newspaperError}`);
 	}
-	return lines.join("\n");
+	return lines;
+}
+
+function renderRetireFailure(
+	slug: string,
+	result: RemoveMindOnceResult,
+): string {
+	return `Retire failed for "${slug}": ${result.error ?? "unknown error"}`;
 }
 
 // ---------------------------------------------------------------------------

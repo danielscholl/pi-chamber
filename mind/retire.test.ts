@@ -201,10 +201,11 @@ describe("runRetireCommand", () => {
 			expect(audit?.entry.slug).toBe("neil");
 			expect(audit?.entry.source).toBe("mind-retire");
 
-			const last = notifications[notifications.length - 1];
-			expect(last.type).toBe("info");
-			expect(last.message).toContain("RETIRED");
-			expect(last.message).toContain("neil");
+			const retiredNotice = notifications.find(
+				(n) => n.type === "info" && n.message.includes("RETIRED"),
+			);
+			expect(retiredNotice).toBeDefined();
+			expect(retiredNotice!.message).toContain("neil");
 		});
 	});
 
@@ -339,9 +340,10 @@ describe("runRetireCommand", () => {
 			await runRetireCommand({ slug: "stub" }, ctx, deps);
 
 			expect(fs.existsSync(paths.mindPath)).toBe(false);
-			const last = notifications[notifications.length - 1];
-			expect(last.type).toBe("info");
-			expect(last.message).toContain("RETIRED");
+			const retiredNotice = notifications.find(
+				(n) => n.type === "info" && n.message.includes("RETIRED"),
+			);
+			expect(retiredNotice).toBeDefined();
 		});
 	});
 

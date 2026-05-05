@@ -545,7 +545,6 @@ export default function (
 		const message = [
 			"Genesis complete.",
 			`Mind: ${mindPath}`,
-			`Runnable agent: ${shimPath}`,
 			`Try direct chat: /mind ${request.slug}`,
 		].join("\n");
 
